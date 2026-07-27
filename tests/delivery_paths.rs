@@ -64,6 +64,8 @@ fn package_script_matches_delivery_contract() {
         fs::read_to_string(root().join("scripts/package_release.sh")).expect("read package script");
     assert!(script.contains("cargo build --release --locked --bin image_viewer"));
     assert!(script.contains("target/release/image_viewer"));
-    assert!(script.contains("${PACKAGE_NAME}-linux-${ARCH}.tar.gz"));
-    assert!(!script.contains("TARGET_ARCH"));
+    assert!(script.contains("ARTIFACT=\"${DIST_DIR}/image_viewer\""));
+    assert!(!script.contains("tar "));
+    assert!(!script.contains("viewer.example.yaml"));
+    assert!(!script.contains("README.md"));
 }

@@ -94,24 +94,19 @@ install -Dm755 target/release/image_viewer ~/.local/bin/image_viewer
 bash scripts/package_release.sh
 ```
 
-脚本会使用锁文件进行 release 构建，并生成：
+脚本会使用锁文件进行 release 构建，清理旧 `dist/` 内容，并且只生成一个二进制文件：
 
 ```text
-dist/forge-tools-image-viewer/
-├── bin/image_viewer
-├── config/viewer.example.yaml
-└── README.md
-
-dist/forge-tools-image-viewer-linux-<arch>.tar.gz
+dist/image_viewer
 ```
 
-解压后可安装：
+安装该二进制：
 
 ```bash
-install -Dm755 forge-tools-image-viewer/bin/image_viewer ~/.local/bin/image_viewer
+install -Dm755 dist/image_viewer ~/.local/bin/image_viewer
 ```
 
-该压缩包是二进制交付包，不是完全静态包；目标机器仍需提供兼容的 glibc、X11/Wayland、Vulkan/OpenGL 驱动及 Dora 运行环境。建议在与部署机相同的 Linux 发行版和 CPU 架构上构建。
+该产物是动态链接的 Linux 二进制；目标机器仍需提供兼容的 glibc、X11/Wayland、Vulkan/OpenGL 驱动及 Dora 运行环境。建议在与部署机相同的 Linux 发行版和 CPU 架构上构建。
 
 ## 配置
 
