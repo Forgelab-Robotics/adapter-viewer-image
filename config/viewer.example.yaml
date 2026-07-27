@@ -1,0 +1,13 @@
+# Image Viewer 配置示例。
+# images 为空或省略时，显示除 tick 外的所有输入。
+images:
+  - image
+
+# 渲染后端：wgpu（默认，Linux 通常走 Vulkan）或 glow（OpenGL）。
+renderer: wgpu
+
+# Legacy 原始字节流解码参数；forge_msgs.Image/CompressedImage 不使用这些字段。
+width: 640
+height: 480
+channels: 3
+bgr: false

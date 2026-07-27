@@ -1,0 +1,14 @@
+nodes:
+  - id: camera
+    path: usb_camera
+    inputs:
+      tick: dora/timer/millis/33
+    outputs:
+      - image
+    args: run --config camera.yaml
+
+  - id: image_viewer
+    path: ../../target/debug/image_viewer
+    inputs:
+      image: camera/image
+    args: --config viewer.yaml
