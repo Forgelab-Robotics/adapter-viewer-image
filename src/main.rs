@@ -4,26 +4,45 @@ mod config;
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use arrow_array::{Array, BinaryArray, LargeBinaryArray, RecordBatch, StructArray};
 use config::{RendererBackend, ResolvedSettings, load_config_file, resolve_settings};
-use crossbeam_channel::{Receiver, Sender, unbounded};
+
 use dora_node_api::{DoraNode, Event, EventStream};
 use eframe::egui;
 use forge_msgs::image::ImageError;
 use forge_msgs::{CompressedImage, Image};
 
 #[derive(Debug)]
-enum UiMsg {
-    Frame {
-        id: String,
-        width: u32,
-        height: u32,
-        rgb: Vec<u8>,
-    },
-    DoraStopped,
+struct ImageFrame {
+    width: u32,
+    height: u32,
+    rgb: Vec<u8>,
+}
+
+/// 跨线程的最新帧 mailbox。每路 input 最多保留一帧，避免 UI 落后时无界积压。
+#[derive(Debug, Default)]
+struct FrameMailbox {
+    pending: Mutex<HashMap<String, ImageFrame>>,
+}
+
+impl FrameMailbox {
+    fn publish(&self, id: String, frame: ImageFrame) {
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id, frame);
+    }
+
+    fn take_all(&self) -> HashMap<String, ImageFrame> {
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::mem::take(&mut *pending)
+    }
 }
 
 fn arrow_to_record_batch(data: &dora_node_api::ArrowData) -> Option<RecordBatch> {
@@ -237,13 +256,13 @@ fn input_allowed(id: &str, filter: &Option<Vec<String>>) -> bool {
 
 fn run_dora_thread(
     mut events: EventStream,
-    tx: Sender<UiMsg>,
+    frames: Arc<FrameMailbox>,
     settings: ResolvedSettings,
     stop: Arc<AtomicBool>,
     decode_warned: Arc<AtomicBool>,
     egui_ctx: egui::Context,
 ) {
-    let wake = || egui_ctx.request_repaint();
+    let wake = || egui_ctx.request_repaint_of(egui::ViewportId::ROOT);
 
     loop {
         if stop.load(Ordering::Relaxed) {
@@ -261,13 +280,8 @@ fn run_dora_thread(
                     continue;
                 }
                 match decode_input(&data, &settings) {
-                    Some((w, h, rgb)) => {
-                        let _ = tx.send(UiMsg::Frame {
-                            id: id_str,
-                            width: w,
-                            height: h,
-                            rgb,
-                        });
+                    Some((width, height, rgb)) => {
+                        frames.publish(id_str, ImageFrame { width, height, rgb });
                         wake();
                     }
                     None => {
@@ -280,32 +294,27 @@ fn run_dora_thread(
                 }
             }
             Event::Stop(_) => {
-                let _ = tx.send(UiMsg::DoraStopped);
+                stop.store(true, Ordering::Relaxed);
                 wake();
                 break;
             }
             Event::Error(msg) => {
                 eprintln!("[image_viewer] error: {msg}");
-                let _ = tx.send(UiMsg::DoraStopped);
+                stop.store(true, Ordering::Relaxed);
                 wake();
                 break;
             }
             _ => {}
         }
     }
-    let _ = tx.send(UiMsg::DoraStopped);
+    stop.store(true, Ordering::Relaxed);
     wake();
 }
 
-fn install_shutdown_signal_handler(
-    stop: Arc<AtomicBool>,
-    tx: Sender<UiMsg>,
-    egui_ctx: egui::Context,
-) {
+fn install_shutdown_signal_handler(stop: Arc<AtomicBool>, egui_ctx: egui::Context) {
     if let Err(err) = ctrlc::set_handler(move || {
         if !stop.swap(true, Ordering::Relaxed) {
-            let _ = tx.send(UiMsg::DoraStopped);
-            egui_ctx.request_repaint();
+            egui_ctx.request_repaint_of(egui::ViewportId::ROOT);
         }
     }) {
         eprintln!("[image_viewer] failed to install shutdown signal handler: {err}");
@@ -313,71 +322,67 @@ fn install_shutdown_signal_handler(
 }
 
 struct ImageViewerApp {
-    rx: Receiver<UiMsg>,
-    /// 每路最新 RGB 像素（用于生成/更新纹理）
-    latest: HashMap<String, (u32, u32, Vec<u8>)>,
+    frames: Arc<FrameMailbox>,
     textures: HashMap<String, egui::TextureHandle>,
     stop: Arc<AtomicBool>,
     /// 用户手动关闭的 input 窗口；本次运行中忽略该 input 的后续帧。
     closed_input_ids: HashSet<String>,
+    /// 已应用到主 viewport 的 input 与纹理尺寸，避免每帧重复发送窗口命令。
+    main_viewport: Option<(String, [usize; 2])>,
+    /// Deferred viewport 通过这里把关闭事件回传给主 App。
+    close_requests: Arc<Mutex<HashSet<String>>>,
 }
 
 impl ImageViewerApp {
-    fn new(cc: &eframe::CreationContext<'_>, rx: Receiver<UiMsg>, stop: Arc<AtomicBool>) -> Self {
+    fn new(
+        cc: &eframe::CreationContext<'_>,
+        frames: Arc<FrameMailbox>,
+        stop: Arc<AtomicBool>,
+    ) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
         Self {
-            rx,
-            latest: HashMap::new(),
+            frames,
             textures: HashMap::new(),
             stop,
             closed_input_ids: HashSet::new(),
+            main_viewport: None,
+            close_requests: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
-    fn drain_updates(&mut self, ctx: &egui::Context) {
-        while let Ok(msg) = self.rx.try_recv() {
-            match msg {
-                UiMsg::Frame {
-                    id,
-                    width,
-                    height,
-                    rgb,
-                } => {
-                    if self.closed_input_ids.contains(&id) {
-                        continue;
-                    }
-                    self.latest.insert(id, (width, height, rgb));
-                    ctx.request_repaint();
-                }
-                UiMsg::DoraStopped => {
-                    self.stop.store(true, Ordering::Relaxed);
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-            }
-        }
-    }
-
-    fn refresh_textures(&mut self, ctx: &egui::Context) {
-        for (id, (w, h, rgb)) in &self.latest {
-            if *w == 0 || *h == 0 || rgb.is_empty() {
+    fn apply_pending_frames(&mut self, ctx: &egui::Context) -> HashSet<String> {
+        let mut updated_ids = HashSet::new();
+        for (id, frame) in self.frames.take_all() {
+            if self.closed_input_ids.contains(&id) {
                 continue;
             }
-            let size = [*w as usize, *h as usize];
-            let color_image = egui::ColorImage::from_rgb(size, rgb);
-            match self.textures.get_mut(id) {
-                Some(tex) => {
-                    tex.set(color_image, egui::TextureOptions::LINEAR);
-                }
+
+            let size = [frame.width as usize, frame.height as usize];
+            let Some(expected_len) = size[0]
+                .checked_mul(size[1])
+                .and_then(|pixels| pixels.checked_mul(3))
+            else {
+                continue;
+            };
+            if size.contains(&0) || frame.rgb.len() != expected_len {
+                continue;
+            }
+
+            let color_image = egui::ColorImage::from_rgb(size, &frame.rgb);
+            match self.textures.get_mut(&id) {
+                Some(texture) => texture.set(color_image, egui::TextureOptions::LINEAR),
                 None => {
-                    let tex = ctx.load_texture(
+                    let texture = ctx.load_texture(
                         format!("img_{id}"),
                         color_image,
                         egui::TextureOptions::LINEAR,
                     );
-                    self.textures.insert(id.clone(), tex);
+                    self.textures.insert(id.clone(), texture);
                 }
             }
+            updated_ids.insert(id);
         }
+        updated_ids
     }
 
     fn initial_image_window_size(texture_size: egui::Vec2) -> egui::Vec2 {
@@ -390,10 +395,26 @@ impl ImageViewerApp {
         ids
     }
 
+    fn image_viewport_id(id: &str) -> egui::ViewportId {
+        egui::ViewportId::from_hash_of(("image_viewer", id))
+    }
+
     fn hide_input_window(&mut self, id: &str) {
-        self.latest.remove(id);
         self.textures.remove(id);
         self.closed_input_ids.insert(id.to_owned());
+    }
+
+    fn apply_close_requests(&mut self) {
+        let requests = {
+            let mut requests = self
+                .close_requests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::take(&mut *requests)
+        };
+        for id in requests {
+            self.hide_input_window(&id);
+        }
     }
 
     fn handle_main_viewport_close(&mut self, ctx: &egui::Context, main_id: Option<&str>) {
@@ -411,20 +432,27 @@ impl ImageViewerApp {
 
     fn show_main_viewport(&mut self, ctx: &egui::Context, main_id: Option<&str>) {
         let Some(id) = main_id else {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            if self.main_viewport.take().is_some() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            }
             return;
         };
         let Some(tex) = self.textures.get(id) else {
             return;
         };
 
-        let title = format!("image_viewer:{id}");
-        let image_size = Self::initial_image_window_size(tex.size_vec2());
-        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
-        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(image_size));
-        ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(image_size));
-        ctx.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(image_size));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        let texture_size = tex.size();
+        let viewport_state = (id.to_owned(), texture_size);
+        if self.main_viewport.as_ref() != Some(&viewport_state) {
+            let title = format!("image_viewer:{id}");
+            let image_size = Self::initial_image_window_size(tex.size_vec2());
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(image_size));
+            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(image_size));
+            ctx.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(image_size));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            self.main_viewport = Some(viewport_state);
+        }
 
         egui::CentralPanel::default()
             .frame(egui::Frame::none())
@@ -434,19 +462,18 @@ impl ImageViewerApp {
             });
     }
 
-    fn show_image_viewports(&mut self, ctx: &egui::Context, main_id: Option<&str>) {
-        let mut to_close = Vec::new();
+    fn show_image_viewports(&self, ctx: &egui::Context, main_id: Option<&str>) {
         for id in self.sorted_texture_ids() {
             if main_id == Some(id.as_str()) {
                 continue;
             }
-            let Some(tex) = self.textures.get(&id).cloned() else {
+            let Some(texture) = self.textures.get(&id).cloned() else {
                 continue;
             };
 
             let title = format!("image_viewer:{id}");
-            let viewport_id = egui::ViewportId::from_hash_of(("image_viewer", &id));
-            let image_size = Self::initial_image_window_size(tex.size_vec2());
+            let viewport_id = Self::image_viewport_id(&id);
+            let image_size = Self::initial_image_window_size(texture.size_vec2());
             let builder = egui::ViewportBuilder::default()
                 .with_title(title.clone())
                 .with_inner_size(image_size)
@@ -454,58 +481,62 @@ impl ImageViewerApp {
                 .with_max_inner_size(image_size)
                 .with_resizable(false)
                 .with_maximize_button(false);
+            let close_requests = Arc::clone(&self.close_requests);
 
-            let close_requested = ctx.show_viewport_immediate(viewport_id, builder, {
-                let title = title.clone();
-                move |ctx, class| {
-                    let mut close_requested = ctx.input(|i| i.viewport().close_requested());
-                    if matches!(class, egui::ViewportClass::Embedded) {
-                        let mut open = true;
-                        egui::Window::new(title.as_str())
-                            .open(&mut open)
-                            .resizable(false)
-                            .show(ctx, |ui| {
-                                ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
-                                ui.image((tex.id(), tex.size_vec2()));
-                            });
-                        close_requested |= !open;
-                    } else {
-                        egui::CentralPanel::default()
-                            .frame(egui::Frame::none())
-                            .show(ctx, |ui| {
-                                ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
-                                ui.image((tex.id(), tex.size_vec2()));
-                            });
-                    }
-                    close_requested
+            ctx.show_viewport_deferred(viewport_id, builder, move |ctx, class| {
+                let mut close_requested = ctx.input(|i| i.viewport().close_requested());
+                if matches!(class, egui::ViewportClass::Embedded) {
+                    let mut open = true;
+                    egui::Window::new(title.as_str())
+                        .open(&mut open)
+                        .resizable(false)
+                        .show(ctx, |ui| {
+                            ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+                            ui.image((texture.id(), texture.size_vec2()));
+                        });
+                    close_requested |= !open;
+                } else {
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::none())
+                        .show(ctx, |ui| {
+                            ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+                            ui.image((texture.id(), texture.size_vec2()));
+                        });
+                }
+
+                if close_requested {
+                    close_requests
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(id.clone());
+                    ctx.request_repaint_of(egui::ViewportId::ROOT);
                 }
             });
-
-            if close_requested {
-                to_close.push(id);
-            }
-        }
-
-        for id in to_close {
-            self.hide_input_window(&id);
         }
     }
 }
 
 impl eframe::App for ImageViewerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.drain_updates(ctx);
+        self.apply_close_requests();
+        let updated_ids = self.apply_pending_frames(ctx);
         if self.stop.load(Ordering::Relaxed) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
-
-        self.refresh_textures(ctx);
         let main_id = self.sorted_texture_ids().into_iter().next();
         self.handle_main_viewport_close(ctx, main_id.as_deref());
         let main_id = self.sorted_texture_ids().into_iter().next();
         self.show_main_viewport(ctx, main_id.as_deref());
         self.show_image_viewports(ctx, main_id.as_deref());
+
+        // Deferred 子窗口独立重绘。先声明 viewport，再只唤醒本轮收到新纹理的窗口；
+        // WGPU 会在父 viewport 返回后提交纹理增量，随后子窗口再安全地引用该纹理。
+        for id in updated_ids {
+            if main_id.as_deref() != Some(id.as_str()) {
+                ctx.request_repaint_of(Self::image_viewport_id(&id));
+            }
+        }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -592,7 +623,7 @@ fn main() -> eyre::Result<()> {
 
     let (node, events) = DoraNode::init_from_env()?;
 
-    let (tx, rx) = unbounded();
+    let frames = Arc::new(FrameMailbox::default());
     let stop = Arc::new(AtomicBool::new(false));
     let decode_warned = Arc::new(AtomicBool::new(false));
 
@@ -611,20 +642,47 @@ fn main() -> eyre::Result<()> {
         options,
         Box::new(move |cc| {
             let egui_ctx = cc.egui_ctx.clone();
-            install_shutdown_signal_handler(Arc::clone(&stop_ui), tx.clone(), egui_ctx.clone());
+            install_shutdown_signal_handler(Arc::clone(&stop_ui), egui_ctx.clone());
             let stop_bg = Arc::clone(&stop_ui);
             let settings_clone = settings.clone();
-            let tx_bg = tx.clone();
+            let frames_bg = Arc::clone(&frames);
             let warned = Arc::clone(&decode_warned);
             std::thread::spawn(move || {
                 let _keep_node = node;
-                run_dora_thread(events, tx_bg, settings_clone, stop_bg, warned, egui_ctx);
+                run_dora_thread(events, frames_bg, settings_clone, stop_bg, warned, egui_ctx);
             });
-            Ok(Box::new(ImageViewerApp::new(cc, rx, stop_ui)))
+            Ok(Box::new(ImageViewerApp::new(cc, frames, stop_ui)))
         }),
     )
     .map_err(|e| eyre::eyre!("eframe: {e}"))?;
 
     stop.store(true, Ordering::Relaxed);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(value: u8) -> ImageFrame {
+        ImageFrame {
+            width: 1,
+            height: 1,
+            rgb: vec![value; 3],
+        }
+    }
+
+    #[test]
+    fn frame_mailbox_keeps_only_the_latest_frame_per_input() {
+        let mailbox = FrameMailbox::default();
+        mailbox.publish("left".to_owned(), frame(1));
+        mailbox.publish("right".to_owned(), frame(2));
+        mailbox.publish("left".to_owned(), frame(3));
+
+        let pending = mailbox.take_all();
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending["left"].rgb, vec![3; 3]);
+        assert_eq!(pending["right"].rgb, vec![2; 3]);
+        assert!(mailbox.take_all().is_empty());
+    }
 }

@@ -8,6 +8,7 @@
 - 输入 `forge_msgs.CompressedImage`：JPEG、PNG（由当前 `forge_msgs` image features 提供）。
 - 兼容 legacy raw bytes，可在配置中指定宽、高、通道数及 BGR 排列。
 - 每路输入创建独立窗口，关闭某一路窗口后，本次运行会忽略该路后续帧。
+- 每路仅缓存最新待显示帧；渲染跟不上输入时主动丢弃旧帧，避免队列积压导致窗口卡死或延迟持续增长。
 - 双渲染后端：默认 WGPU（Linux 通常走 Vulkan），可切换到 Glow/OpenGL。
 
 ## 项目结构

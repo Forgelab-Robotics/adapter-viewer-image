@@ -15,7 +15,6 @@ ndarray = "0.17.2"
 arrow-array = "54.3.1"
 dora-node-api = "0.4.1"
 forge_msgs = { git = "https://gitlab.ex-ai.cn/meta-emt/framework/forge.git", package = "forge_msgs", branch = "dev" }
-crossbeam-channel = "0.5.15"
 eframe = { version = "0.29", features = ["wgpu"] }
 egui = "0.29"
 ctrlc = { version = "3.5.2", features = ["termination"] }
