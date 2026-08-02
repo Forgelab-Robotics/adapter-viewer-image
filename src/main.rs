@@ -553,6 +553,7 @@ struct CliArgs {
     channels: Option<u32>,
     bgr: bool,
     renderer: Option<RendererBackend>,
+    version: bool,
 }
 
 fn parse_cli() -> eyre::Result<CliArgs> {
@@ -598,6 +599,7 @@ fn parse_cli() -> eyre::Result<CliArgs> {
                     }
                 });
             }
+            "--version" | "-V" => args.version = true,
             _ => {}
         }
     }
@@ -606,6 +608,11 @@ fn parse_cli() -> eyre::Result<CliArgs> {
 
 fn main() -> eyre::Result<()> {
     let cli = parse_cli()?;
+    if cli.version {
+        println!("image_viewer {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     let file_cfg = load_config_file(cli.config.as_deref())?;
     let settings = resolve_settings(
         file_cfg,

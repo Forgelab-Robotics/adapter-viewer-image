@@ -146,6 +146,7 @@ bgr: false
 
 CLI 参数：
 
+- `--version`：输出 `image_viewer` 版本并退出。
 - `--config <PATH>`：配置文件路径。
 - `--input-id <ID>`：临时只显示指定 input。
 - `--width <W>`、`--height <H>`、`--channels <C>`：显式覆盖 legacy raw bytes 尺寸/通道参数，包括覆盖成默认值 `640/480/3`。

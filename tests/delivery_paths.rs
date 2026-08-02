@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use serde_yaml::Value;
 
@@ -34,6 +35,21 @@ fn manifest_keeps_stable_package_and_binary_names() {
     let manifest = fs::read_to_string(root().join("Cargo.toml")).expect("read Cargo.toml");
     assert!(manifest.contains("name = \"forge-tools-image-viewer\""));
     assert!(manifest.contains("name = \"image_viewer\""));
+}
+
+#[test]
+fn version_flag_reports_binary_name_and_package_version() {
+    let output = Command::new(env!("CARGO_BIN_EXE_image_viewer"))
+        .arg("--version")
+        .output()
+        .expect("run image_viewer --version");
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "image_viewer 1.0.0\n"
+    );
+    assert!(output.stderr.is_empty());
 }
 
 #[test]
