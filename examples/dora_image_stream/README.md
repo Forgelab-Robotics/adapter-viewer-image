@@ -14,7 +14,7 @@ USB/UVC camera -> forge_msgs.Image/CompressedImage -> image_viewer
    cargo build --locked --bin image_viewer
    ```
 
-2. 从 `framework/devices/camera/usb_camera` 构建 `usb_camera`，并将其加入 `PATH`。
+2. 单独构建兼容的 `usb_camera` Dora 节点，并将其加入 `PATH`。
 3. 根据实际设备修改 `camera.yaml` 中的 `/dev/video0`。
 
 ## 运行

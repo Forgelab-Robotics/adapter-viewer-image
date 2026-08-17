@@ -1,11 +1,18 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 
 use serde_yaml::Value;
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn run_image_viewer(args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_image_viewer"))
+        .args(args)
+        .output()
+        .expect("run image_viewer")
 }
 
 fn read_yaml(path: &Path) -> Value {
@@ -19,6 +26,11 @@ fn read_yaml(path: &Path) -> Value {
 fn delivery_files_are_at_stable_paths() {
     let root = root();
     for relative in [
+        ".github/workflows/ci.yml",
+        "LICENSE",
+        "CHANGELOG.md",
+        "CONTRIBUTING.md",
+        "RELEASING.md",
         "config/viewer.example.yaml",
         "examples/dora_image_stream/README.md",
         "examples/dora_image_stream/camera.yaml",
@@ -35,21 +47,63 @@ fn manifest_keeps_stable_package_and_binary_names() {
     let manifest = fs::read_to_string(root().join("Cargo.toml")).expect("read Cargo.toml");
     assert!(manifest.contains("name = \"forge-tools-image-viewer\""));
     assert!(manifest.contains("name = \"image_viewer\""));
+    assert!(manifest.contains("license = \"Apache-2.0\""));
+    assert!(manifest.contains("authors = [\"X-ERA\"]"));
+    assert!(manifest.contains("forge_msgs = \"1.0.1\""));
+    assert!(
+        manifest
+            .contains("repository = \"https://github.com/Forgelab-Robotics/adapter-viewer-image\"")
+    );
+    assert!(!manifest.contains(concat!("gitlab.", "ex-ai.cn")));
 }
 
 #[test]
 fn version_flag_reports_binary_name_and_package_version() {
-    let output = Command::new(env!("CARGO_BIN_EXE_image_viewer"))
-        .arg("--version")
-        .output()
-        .expect("run image_viewer --version");
+    let output = run_image_viewer(&["--version"]);
 
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        "image_viewer 1.0.0\n"
+        format!("image_viewer {}\n", env!("CARGO_PKG_VERSION"))
     );
     assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn help_is_available_without_a_dora_runtime() {
+    let output = run_image_viewer(&["--help"]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Display Dora Forge image streams"));
+    assert!(stdout.contains("--renderer <RENDERER>"));
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn invalid_cli_values_are_rejected_before_dora_initialization() {
+    for args in [
+        &["--width", "nope"][..],
+        &["--unknown"][..],
+        &["--config"][..],
+    ] {
+        let output = run_image_viewer(args);
+        assert_eq!(output.status.code(), Some(2));
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains("error:"));
+        assert!(!stderr.contains("DORA_NODE_CONFIG"));
+    }
+}
+
+#[test]
+fn explicit_missing_config_has_a_stable_error_without_debug_locations() {
+    let output = run_image_viewer(&[
+        "--config",
+        "/__forge_image_viewer_missing__/viewer.example.yaml",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("failed to read config"));
+    assert!(!stderr.contains("Location:"));
 }
 
 #[test]
@@ -78,9 +132,21 @@ fn example_connects_camera_to_viewer_with_relative_artifact_path() {
 fn package_script_matches_delivery_contract() {
     let script =
         fs::read_to_string(root().join("scripts/package_release.sh")).expect("read package script");
-    assert!(script.contains("cargo build --release --locked --bin image_viewer"));
-    assert!(script.contains("target/release/image_viewer"));
+    assert!(
+        script.contains("cargo build --release --locked --target \"${TARGET}\" --bin image_viewer")
+    );
+    assert!(
+        script.contains("BUILT_ARTIFACT=\"${ROOT_DIR}/target/${TARGET}/release/image_viewer\"")
+    );
+    assert!(script.contains("TARGET=\"x86_64-unknown-linux-gnu\""));
+    assert!(script.contains("trap 'rm -rf \"${DIST_DIR}\"' ERR"));
+    assert!(
+        script.find("rm -rf \"${DIST_DIR}\"").unwrap()
+            < script.find("cargo build --release").unwrap()
+    );
+    assert!(script.contains("unset CARGO_BUILD_TARGET CARGO_ENCODED_RUSTFLAGS"));
     assert!(script.contains("ARTIFACT=\"${DIST_DIR}/image_viewer\""));
+    assert!(script.contains("install -m 0755"));
     assert!(!script.contains("tar "));
     assert!(!script.contains("viewer.example.yaml"));
     assert!(!script.contains("README.md"));

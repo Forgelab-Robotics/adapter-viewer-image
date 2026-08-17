@@ -3,17 +3,28 @@
 mod config;
 
 use std::collections::{HashMap, HashSet};
+use std::io::Cursor;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use arrow_array::{Array, BinaryArray, LargeBinaryArray, RecordBatch, StructArray};
-use config::{RendererBackend, ResolvedSettings, load_config_file, resolve_settings};
+use clap::Parser;
+use config::{
+    MAX_IMAGE_DIMENSION, MAX_INPUT_ID_LEN, MAX_INPUTS, RendererBackend, ResolvedSettings,
+    load_config_file, resolve_settings, validate_image_dimensions,
+};
 
 use dora_node_api::{DoraNode, Event, EventStream};
 use eframe::egui;
-use forge_msgs::image::ImageError;
 use forge_msgs::{CompressedImage, Image};
+use image::{ImageFormat, ImageReader};
+
+const MAX_COMPRESSED_BYTES: usize = 64 * 1024 * 1024;
+const MAX_RAW_BYTES: usize = 128 * 1024 * 1024;
+const MAX_DECODE_ALLOC_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_PENDING_RGB_BYTES: usize = 256 * 1024 * 1024;
+const MAX_TOTAL_TEXTURE_PIXELS: usize = 64 * 1024 * 1024;
 
 #[derive(Debug)]
 struct ImageFrame {
@@ -29,11 +40,24 @@ struct FrameMailbox {
 }
 
 impl FrameMailbox {
-    fn publish(&self, id: String, frame: ImageFrame) {
-        self.pending
+    fn publish(&self, id: String, frame: ImageFrame) -> bool {
+        let mut pending = self
+            .pending
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(id, frame);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let current_bytes = pending
+            .values()
+            .map(|pending_frame| pending_frame.rgb.len())
+            .sum::<usize>();
+        let replaced_bytes = pending.get(&id).map_or(0, |old| old.rgb.len());
+        let projected_bytes = current_bytes
+            .saturating_sub(replaced_bytes)
+            .saturating_add(frame.rgb.len());
+        if projected_bytes > MAX_PENDING_RGB_BYTES {
+            return false;
+        }
+        pending.insert(id, frame);
+        true
     }
 
     fn take_all(&self) -> HashMap<String, ImageFrame> {
@@ -51,66 +75,168 @@ fn arrow_to_record_batch(data: &dora_node_api::ArrowData) -> Option<RecordBatch>
     Some(RecordBatch::from(sa.clone()))
 }
 
-fn try_decode_forge_image(batch: &RecordBatch) -> Option<(u32, u32, Vec<u8>)> {
-    if let Ok(img) = Image::from_record_batch(batch) {
-        if img.width == 0 || img.height == 0 {
-            return None;
-        }
-        let rgb = raw_image_to_rgb(&img).ok()?;
-        return Some((img.width, img.height, rgb));
-    }
-
-    let img = CompressedImage::from_record_batch(batch).ok()?;
-    let arr = img.to_rgb8_ndarray().ok()?;
-    let (h, w, _) = arr.dim();
-    if h == 0 || w == 0 {
-        return None;
-    }
-    Some((w as u32, h as u32, arr.into_raw_vec_and_offset().0))
+fn allocate_rgb(pixel_count: usize) -> Result<Vec<u8>, String> {
+    let len = pixel_count
+        .checked_mul(3)
+        .ok_or_else(|| "RGB buffer length overflow".to_owned())?;
+    let mut rgb = Vec::new();
+    rgb.try_reserve_exact(len)
+        .map_err(|error| format!("failed to allocate {len} RGB bytes: {error}"))?;
+    Ok(rgb)
 }
 
-fn raw_image_to_rgb(img: &Image) -> Result<Vec<u8>, ImageError> {
-    let width = img.width as usize;
-    let height = img.height as usize;
-    let step = img.step as usize;
-    let data = img.data.as_ref();
-    let mut rgb = Vec::with_capacity(width * height * 3);
+fn image_row(data: &[u8], y: usize, step: usize, row_len: usize) -> Result<&[u8], String> {
+    let start = y
+        .checked_mul(step)
+        .ok_or_else(|| "row offset overflow".to_owned())?;
+    let end = start
+        .checked_add(row_len)
+        .ok_or_else(|| "row length overflow".to_owned())?;
+    data.get(start..end)
+        .ok_or_else(|| format!("row {y} exceeds the image buffer"))
+}
 
-    match img.encoding.as_str() {
+fn forge_message_kind_and_payload_len(batch: &RecordBatch) -> Result<(bool, usize), String> {
+    if batch.num_rows() == 0 {
+        return Err("Forge image record batch is empty".to_owned());
+    }
+    let schema = batch.schema();
+    let is_raw = ["height", "width", "encoding", "step", "data"]
+        .iter()
+        .all(|name| schema.index_of(name).is_ok());
+    let is_compressed = ["format", "data"]
+        .iter()
+        .all(|name| schema.index_of(name).is_ok());
+    if is_raw == is_compressed {
+        return Err("Forge image schema is missing required fields or is ambiguous".to_owned());
+    }
+
+    let data_index = schema
+        .index_of("data")
+        .map_err(|_| "Forge image schema is missing the data field".to_owned())?;
+    let data = batch
+        .column(data_index)
+        .as_any()
+        .downcast_ref::<LargeBinaryArray>()
+        .ok_or_else(|| "Forge image data field must be LargeBinary".to_owned())?;
+    if data.is_empty() || data.is_null(0) {
+        return Err("Forge image data field is empty or null".to_owned());
+    }
+    let payload_len = usize::try_from(data.value_length(0))
+        .map_err(|_| "Forge image payload length exceeds this platform".to_owned())?;
+    Ok((is_raw, payload_len))
+}
+
+fn try_decode_forge_image(batch: &RecordBatch) -> Result<(u32, u32, Vec<u8>), String> {
+    let (is_raw, payload_len) = forge_message_kind_and_payload_len(batch)?;
+    let limit = if is_raw {
+        MAX_RAW_BYTES
+    } else {
+        MAX_COMPRESSED_BYTES
+    };
+    if payload_len > limit {
+        return Err(format!(
+            "image payload contains {payload_len} bytes, exceeding the {limit}-byte limit"
+        ));
+    }
+
+    if is_raw {
+        let image = Image::from_record_batch(batch).map_err(|error| error.to_string())?;
+        let rgb = raw_image_to_rgb(&image)?;
+        Ok((image.width, image.height, rgb))
+    } else {
+        let image = CompressedImage::from_record_batch(batch).map_err(|error| error.to_string())?;
+        decode_compressed_image(&image)
+    }
+}
+
+fn decode_compressed_image(image: &CompressedImage) -> Result<(u32, u32, Vec<u8>), String> {
+    if image.data.is_empty() {
+        return Err("compressed image data is empty".to_owned());
+    }
+    if image.data.len() > MAX_COMPRESSED_BYTES {
+        return Err(format!(
+            "compressed image contains {} bytes, exceeding the {MAX_COMPRESSED_BYTES}-byte limit",
+            image.data.len()
+        ));
+    }
+
+    let mut reader = ImageReader::new(Cursor::new(image.data.as_ref()))
+        .with_guessed_format()
+        .map_err(|error| format!("failed to inspect compressed image: {error}"))?;
+    if !matches!(reader.format(), Some(ImageFormat::Jpeg | ImageFormat::Png)) {
+        return Err("compressed image must contain JPEG or PNG data".to_owned());
+    }
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_IMAGE_DIMENSION);
+    limits.max_image_height = Some(MAX_IMAGE_DIMENSION);
+    limits.max_alloc = Some(MAX_DECODE_ALLOC_BYTES);
+    reader.limits(limits);
+
+    let decoded = reader
+        .decode()
+        .map_err(|error| format!("failed to decode compressed image: {error}"))?;
+    let width = decoded.width();
+    let height = decoded.height();
+    validate_image_dimensions(width, height).map_err(|error| error.to_string())?;
+    Ok((width, height, decoded.to_rgb8().into_raw()))
+}
+
+fn raw_image_to_rgb(image: &Image) -> Result<Vec<u8>, String> {
+    let pixel_count =
+        validate_image_dimensions(image.width, image.height).map_err(|error| error.to_string())?;
+    let width = usize::try_from(image.width).map_err(|error| error.to_string())?;
+    let height = usize::try_from(image.height).map_err(|error| error.to_string())?;
+    let step = usize::try_from(image.step).map_err(|error| error.to_string())?;
+    let data = image.data.as_ref();
+    if data.len() > MAX_RAW_BYTES {
+        return Err(format!(
+            "raw image contains {} bytes, exceeding the {MAX_RAW_BYTES}-byte limit",
+            data.len()
+        ));
+    }
+
+    match image.encoding.as_str() {
         "rgb8" => {
+            let row_len = width
+                .checked_mul(3)
+                .ok_or_else(|| "RGB row length overflow".to_owned())?;
+            let mut rgb = allocate_rgb(pixel_count)?;
             for y in 0..height {
-                let row = &data[y * step..y * step + width * 3];
-                rgb.extend_from_slice(row);
+                rgb.extend_from_slice(image_row(data, y, step, row_len)?);
             }
             Ok(rgb)
         }
         "bgr8" => {
+            let row_len = width
+                .checked_mul(3)
+                .ok_or_else(|| "BGR row length overflow".to_owned())?;
+            let mut rgb = allocate_rgb(pixel_count)?;
             for y in 0..height {
-                let row = &data[y * step..y * step + width * 3];
-                for pixel in row.chunks_exact(3) {
+                for pixel in image_row(data, y, step, row_len)?.chunks_exact(3) {
                     rgb.extend([pixel[2], pixel[1], pixel[0]]);
                 }
             }
             Ok(rgb)
         }
         "mono8" => {
+            let mut rgb = allocate_rgb(pixel_count)?;
             for y in 0..height {
-                let row = &data[y * step..y * step + width];
-                for &g in row {
-                    rgb.extend([g, g, g]);
+                for &gray in image_row(data, y, step, width)? {
+                    rgb.extend([gray, gray, gray]);
                 }
             }
             Ok(rgb)
         }
         "16UC1" => {
-            let values = read_u16_image(data, width, height, step)?;
+            let values = read_u16_image(data, width, height, step, pixel_count)?;
             grayscale_u16_to_rgb(&values)
         }
         "32FC1" => {
-            let values = read_f32_image(data, width, height, step)?;
+            let values = read_f32_image(data, width, height, step, pixel_count)?;
             grayscale_f32_to_rgb(&values)
         }
-        other => Err(ImageError::UnsupportedEncoding(other.to_string())),
+        other => Err(format!("unsupported image encoding `{other}`")),
     }
 }
 
@@ -119,11 +245,17 @@ fn read_u16_image(
     width: usize,
     height: usize,
     step: usize,
-) -> Result<Vec<u16>, ImageError> {
-    let mut values = Vec::with_capacity(width * height);
+    pixel_count: usize,
+) -> Result<Vec<u16>, String> {
+    let row_len = width
+        .checked_mul(2)
+        .ok_or_else(|| "16UC1 row length overflow".to_owned())?;
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(pixel_count)
+        .map_err(|error| format!("failed to allocate 16UC1 values: {error}"))?;
     for y in 0..height {
-        let row = &data[y * step..y * step + width * 2];
-        for chunk in row.chunks_exact(2) {
+        for chunk in image_row(data, y, step, row_len)?.chunks_exact(2) {
             values.push(u16::from_le_bytes([chunk[0], chunk[1]]));
         }
     }
@@ -135,48 +267,56 @@ fn read_f32_image(
     width: usize,
     height: usize,
     step: usize,
-) -> Result<Vec<f32>, ImageError> {
-    let mut values = Vec::with_capacity(width * height);
+    pixel_count: usize,
+) -> Result<Vec<f32>, String> {
+    let row_len = width
+        .checked_mul(4)
+        .ok_or_else(|| "32FC1 row length overflow".to_owned())?;
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(pixel_count)
+        .map_err(|error| format!("failed to allocate 32FC1 values: {error}"))?;
     for y in 0..height {
-        let row = &data[y * step..y * step + width * 4];
-        for chunk in row.chunks_exact(4) {
+        for chunk in image_row(data, y, step, row_len)?.chunks_exact(4) {
             values.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
         }
     }
     Ok(values)
 }
 
-fn grayscale_u16_to_rgb(values: &[u16]) -> Result<Vec<u8>, ImageError> {
+fn grayscale_u16_to_rgb(values: &[u16]) -> Result<Vec<u8>, String> {
+    let mut rgb = allocate_rgb(values.len())?;
     let max = values.iter().copied().max().unwrap_or(0);
-    if max == 0 {
-        return Ok(vec![0; values.len() * 3]);
-    }
-    let mut rgb = Vec::with_capacity(values.len() * 3);
     for &value in values {
-        let g = ((value as f32 / max as f32) * 255.0).round() as u8;
-        rgb.extend([g, g, g]);
+        let gray = if max == 0 {
+            0
+        } else {
+            ((value as f32 / max as f32) * 255.0).round() as u8
+        };
+        rgb.extend([gray, gray, gray]);
     }
     Ok(rgb)
 }
 
-fn grayscale_f32_to_rgb(values: &[f32]) -> Result<Vec<u8>, ImageError> {
-    let finite: Vec<f32> = values.iter().copied().filter(|v| v.is_finite()).collect();
-    if finite.is_empty() {
-        return Ok(vec![0; values.len() * 3]);
-    }
-    let min = finite.iter().copied().fold(f32::INFINITY, f32::min);
-    let max = finite.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    if max <= min {
-        return Ok(vec![0; values.len() * 3]);
-    }
-    let mut rgb = Vec::with_capacity(values.len() * 3);
+fn grayscale_f32_to_rgb(values: &[f32]) -> Result<Vec<u8>, String> {
+    let min = values
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite())
+        .fold(f32::INFINITY, f32::min);
+    let max = values
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite())
+        .fold(f32::NEG_INFINITY, f32::max);
+    let mut rgb = allocate_rgb(values.len())?;
     for &value in values {
-        let g = if value.is_finite() {
+        let gray = if value.is_finite() && max > min {
             (((value - min) / (max - min)) * 255.0).clamp(0.0, 255.0) as u8
         } else {
             0
         };
-        rgb.extend([g, g, g]);
+        rgb.extend([gray, gray, gray]);
     }
     Ok(rgb)
 }
@@ -184,73 +324,70 @@ fn grayscale_f32_to_rgb(values: &[f32]) -> Result<Vec<u8>, ImageError> {
 fn try_decode_legacy_bytes(
     data: &dora_node_api::ArrowData,
     settings: &ResolvedSettings,
-) -> Option<(u32, u32, Vec<u8>)> {
-    let w = settings.legacy_width;
-    let h = settings.legacy_height;
-    let c = settings.legacy_channels;
-    if w == 0 || h == 0 || c == 0 || c > 4 {
-        return None;
-    }
-
-    let arr = data.deref();
-    let bytes: &[u8] = if let Some(lb) = arr.as_any().downcast_ref::<LargeBinaryArray>() {
-        if lb.is_empty() || lb.is_null(0) {
-            return None;
+) -> Result<(u32, u32, Vec<u8>), String> {
+    let array = data.deref();
+    let bytes: &[u8] = if let Some(array) = array.as_any().downcast_ref::<LargeBinaryArray>() {
+        if array.is_empty() || array.is_null(0) {
+            return Err("legacy LargeBinary input is empty or null".to_owned());
         }
-        lb.value(0)
+        array.value(0)
+    } else if let Some(array) = array.as_any().downcast_ref::<BinaryArray>() {
+        if array.is_empty() || array.is_null(0) {
+            return Err("legacy Binary input is empty or null".to_owned());
+        }
+        array.value(0)
     } else {
-        let b = arr.as_any().downcast_ref::<BinaryArray>()?;
-        if b.is_empty() || b.is_null(0) {
-            return None;
-        }
-        b.value(0)
+        return Err("input is neither a Forge image struct nor legacy binary data".to_owned());
     };
 
-    let expected = (w * h * c) as usize;
+    let pixel_count = validate_image_dimensions(settings.legacy_width, settings.legacy_height)
+        .map_err(|error| error.to_string())?;
+    let channels = usize::try_from(settings.legacy_channels).map_err(|error| error.to_string())?;
+    let expected = pixel_count
+        .checked_mul(channels)
+        .ok_or_else(|| "legacy input length overflow".to_owned())?;
     if bytes.len() != expected {
-        return None;
+        return Err(format!(
+            "legacy input contains {} bytes; expected {expected}",
+            bytes.len()
+        ));
     }
 
-    let mut rgb = Vec::with_capacity((w * h * 3) as usize);
-    match c {
+    let mut rgb = allocate_rgb(pixel_count)?;
+    match settings.legacy_channels {
         1 => {
-            for &g in bytes {
-                rgb.extend([g, g, g]);
+            for &gray in bytes {
+                rgb.extend([gray, gray, gray]);
             }
         }
-        3 => {
-            if settings.legacy_bgr {
-                for chunk in bytes.chunks_exact(3) {
-                    rgb.extend([chunk[2], chunk[1], chunk[0]]);
-                }
-            } else {
-                rgb.extend_from_slice(bytes);
+        3 if settings.legacy_bgr => {
+            for pixel in bytes.chunks_exact(3) {
+                rgb.extend([pixel[2], pixel[1], pixel[0]]);
             }
         }
-        _ => return None,
+        3 => rgb.extend_from_slice(bytes),
+        channels => return Err(format!("unsupported legacy channel count {channels}")),
     }
-    Some((w, h, rgb))
+    Ok((settings.legacy_width, settings.legacy_height, rgb))
 }
 
 fn decode_input(
     data: &dora_node_api::ArrowData,
     settings: &ResolvedSettings,
-) -> Option<(u32, u32, Vec<u8>)> {
-    if let Some(batch) = arrow_to_record_batch(data)
-        && let Some(t) = try_decode_forge_image(&batch)
-    {
-        return Some(t);
+) -> Result<(u32, u32, Vec<u8>), String> {
+    match arrow_to_record_batch(data) {
+        Some(batch) => try_decode_forge_image(&batch),
+        None => try_decode_legacy_bytes(data, settings),
     }
-    try_decode_legacy_bytes(data, settings)
 }
 
 fn input_allowed(id: &str, filter: &Option<Vec<String>>) -> bool {
-    if id == "tick" {
+    if id == "tick" || id.is_empty() || id.len() > MAX_INPUT_ID_LEN {
         return false;
     }
     match filter {
         None => true,
-        Some(ids) => ids.iter().any(|x| x == id),
+        Some(ids) => ids.iter().any(|configured| configured == id),
     }
 }
 
@@ -259,10 +396,14 @@ fn run_dora_thread(
     frames: Arc<FrameMailbox>,
     settings: ResolvedSettings,
     stop: Arc<AtomicBool>,
-    decode_warned: Arc<AtomicBool>,
     egui_ctx: egui::Context,
 ) {
     let wake = || egui_ctx.request_repaint_of(egui::ViewportId::ROOT);
+    let mut active_ids = HashSet::new();
+    let mut decode_warned_ids = HashSet::new();
+    let mut decode_warning_limit_warned = false;
+    let mut input_limit_warned = false;
+    let mut mailbox_limit_warned = false;
 
     loop {
         if stop.load(Ordering::Relaxed) {
@@ -279,16 +420,39 @@ fn run_dora_thread(
                 if !input_allowed(&id_str, &settings.filter_ids) {
                     continue;
                 }
-                match decode_input(&data, &settings) {
-                    Some((width, height, rgb)) => {
-                        frames.publish(id_str, ImageFrame { width, height, rgb });
-                        wake();
+                if !active_ids.contains(&id_str) && active_ids.len() >= MAX_INPUTS {
+                    if !input_limit_warned {
+                        eprintln!(
+                            "[image_viewer] ignoring additional inputs after reaching the {MAX_INPUTS}-input limit"
+                        );
+                        input_limit_warned = true;
                     }
-                    None => {
-                        if !decode_warned.swap(true, Ordering::Relaxed) {
+                    continue;
+                }
+                match decode_input(&data, &settings) {
+                    Ok((width, height, rgb)) => {
+                        active_ids.insert(id_str.clone());
+                        if frames.publish(id_str, ImageFrame { width, height, rgb }) {
+                            wake();
+                        } else if !mailbox_limit_warned {
                             eprintln!(
-                                "[image_viewer] 无法解码输入（forge_msgs.Image / CompressedImage Arrow 或 legacy raw bytes）。"
+                                "[image_viewer] dropping frames after reaching the {MAX_PENDING_RGB_BYTES}-byte pending-frame limit"
                             );
+                            mailbox_limit_warned = true;
+                        }
+                    }
+                    Err(error) => {
+                        if decode_warned_ids.len() < MAX_INPUTS {
+                            if decode_warned_ids.insert(id_str.clone()) {
+                                eprintln!(
+                                    "[image_viewer] failed to decode input `{id_str}`: {error}"
+                                );
+                            }
+                        } else if !decode_warning_limit_warned {
+                            eprintln!(
+                                "[image_viewer] suppressing decode warnings after {MAX_INPUTS} distinct failing input IDs"
+                            );
+                            decode_warning_limit_warned = true;
                         }
                     }
                 }
@@ -331,6 +495,7 @@ struct ImageViewerApp {
     main_viewport: Option<(String, [usize; 2])>,
     /// Deferred viewport 通过这里把关闭事件回传给主 App。
     close_requests: Arc<Mutex<HashSet<String>>>,
+    texture_limit_warned: bool,
 }
 
 impl ImageViewerApp {
@@ -347,6 +512,7 @@ impl ImageViewerApp {
             closed_input_ids: HashSet::new(),
             main_viewport: None,
             close_requests: Arc::new(Mutex::new(HashSet::new())),
+            texture_limit_warned: false,
         }
     }
 
@@ -365,6 +531,23 @@ impl ImageViewerApp {
                 continue;
             };
             if size.contains(&0) || frame.rgb.len() != expected_len {
+                continue;
+            }
+            let other_texture_pixels = self
+                .textures
+                .iter()
+                .filter(|(texture_id, _)| texture_id.as_str() != id)
+                .map(|(_, texture)| texture.size()[0].saturating_mul(texture.size()[1]))
+                .fold(0usize, usize::saturating_add);
+            let projected_texture_pixels =
+                other_texture_pixels.saturating_add(size[0].saturating_mul(size[1]));
+            if projected_texture_pixels > MAX_TOTAL_TEXTURE_PIXELS {
+                if !self.texture_limit_warned {
+                    eprintln!(
+                        "[image_viewer] dropping frames after reaching the {MAX_TOTAL_TEXTURE_PIXELS}-pixel texture limit"
+                    );
+                    self.texture_limit_warned = true;
+                }
                 continue;
             }
 
@@ -544,75 +727,30 @@ impl eframe::App for ImageViewerApp {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Parser)]
+#[command(
+    name = "image_viewer",
+    version,
+    about = "Display Dora Forge image streams in native windows"
+)]
 struct CliArgs {
+    #[arg(long, value_name = "PATH")]
     config: Option<String>,
+    #[arg(long, value_name = "ID")]
     input_id: Option<String>,
+    #[arg(long, value_name = "PIXELS")]
     width: Option<u32>,
+    #[arg(long, value_name = "PIXELS")]
     height: Option<u32>,
+    #[arg(long, value_name = "COUNT")]
     channels: Option<u32>,
+    #[arg(long)]
     bgr: bool,
+    #[arg(long, value_enum)]
     renderer: Option<RendererBackend>,
-    version: bool,
 }
 
-fn parse_cli() -> eyre::Result<CliArgs> {
-    let mut args = CliArgs::default();
-    let mut it = std::env::args().skip(1);
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--config" => args.config = it.next(),
-            "--input-id" => args.input_id = it.next(),
-            "--width" => {
-                if let Some(v) = it.next()
-                    && let Ok(n) = v.parse()
-                {
-                    args.width = Some(n);
-                }
-            }
-            "--height" => {
-                if let Some(v) = it.next()
-                    && let Ok(n) = v.parse()
-                {
-                    args.height = Some(n);
-                }
-            }
-            "--channels" => {
-                if let Some(v) = it.next()
-                    && let Ok(n) = v.parse()
-                {
-                    args.channels = Some(n);
-                }
-            }
-            "--bgr" => args.bgr = true,
-            "--renderer" => {
-                let value = it
-                    .next()
-                    .ok_or_else(|| eyre::eyre!("--renderer requires `wgpu` or `glow`"))?;
-                args.renderer = Some(match value.as_str() {
-                    "wgpu" => RendererBackend::Wgpu,
-                    "glow" => RendererBackend::Glow,
-                    _ => {
-                        return Err(eyre::eyre!(
-                            "unsupported renderer `{value}`; expected `wgpu` or `glow`"
-                        ));
-                    }
-                });
-            }
-            "--version" | "-V" => args.version = true,
-            _ => {}
-        }
-    }
-    Ok(args)
-}
-
-fn main() -> eyre::Result<()> {
-    let cli = parse_cli()?;
-    if cli.version {
-        println!("image_viewer {}", env!("CARGO_PKG_VERSION"));
-        return Ok(());
-    }
-
+fn run(cli: CliArgs) -> eyre::Result<()> {
     let file_cfg = load_config_file(cli.config.as_deref())?;
     let settings = resolve_settings(
         file_cfg,
@@ -622,7 +760,7 @@ fn main() -> eyre::Result<()> {
         cli.channels,
         cli.bgr,
         cli.renderer,
-    );
+    )?;
     let renderer = match settings.renderer {
         RendererBackend::Wgpu => eframe::Renderer::Wgpu,
         RendererBackend::Glow => eframe::Renderer::Glow,
@@ -632,11 +770,10 @@ fn main() -> eyre::Result<()> {
 
     let frames = Arc::new(FrameMailbox::default());
     let stop = Arc::new(AtomicBool::new(false));
-    let decode_warned = Arc::new(AtomicBool::new(false));
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("forge image_viewer")
+            .with_title("X-ERA image_viewer")
             .with_inner_size([1.0, 1.0])
             .with_visible(false),
         renderer,
@@ -653,11 +790,24 @@ fn main() -> eyre::Result<()> {
             let stop_bg = Arc::clone(&stop_ui);
             let settings_clone = settings.clone();
             let frames_bg = Arc::clone(&frames);
-            let warned = Arc::clone(&decode_warned);
-            std::thread::spawn(move || {
-                let _keep_node = node;
-                run_dora_thread(events, frames_bg, settings_clone, stop_bg, warned, egui_ctx);
-            });
+            let worker = std::thread::Builder::new()
+                .name("image-viewer-dora".to_owned())
+                .spawn(move || {
+                    let _keep_node = node;
+                    let panic_stop = Arc::clone(&stop_bg);
+                    let panic_ctx = egui_ctx.clone();
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        run_dora_thread(events, frames_bg, settings_clone, stop_bg, egui_ctx);
+                    }));
+                    if result.is_err() {
+                        eprintln!("[image_viewer] Dora worker thread panicked");
+                        panic_stop.store(true, Ordering::Relaxed);
+                        panic_ctx.request_repaint_of(egui::ViewportId::ROOT);
+                    }
+                });
+            if let Err(error) = worker {
+                return Err(Box::new(error));
+            }
             Ok(Box::new(ImageViewerApp::new(cc, frames, stop_ui)))
         }),
     )
@@ -665,6 +815,13 @@ fn main() -> eyre::Result<()> {
 
     stop.store(true, Ordering::Relaxed);
     Ok(())
+}
+
+fn main() {
+    if let Err(error) = run(CliArgs::parse()) {
+        eprintln!("[image_viewer] error: {error:#}");
+        std::process::exit(1);
+    }
 }
 
 #[cfg(test)]
@@ -682,14 +839,79 @@ mod tests {
     #[test]
     fn frame_mailbox_keeps_only_the_latest_frame_per_input() {
         let mailbox = FrameMailbox::default();
-        mailbox.publish("left".to_owned(), frame(1));
-        mailbox.publish("right".to_owned(), frame(2));
-        mailbox.publish("left".to_owned(), frame(3));
+        assert!(mailbox.publish("left".to_owned(), frame(1)));
+        assert!(mailbox.publish("right".to_owned(), frame(2)));
+        assert!(mailbox.publish("left".to_owned(), frame(3)));
 
         let pending = mailbox.take_all();
         assert_eq!(pending.len(), 2);
         assert_eq!(pending["left"].rgb, vec![3; 3]);
         assert_eq!(pending["right"].rgb, vec![2; 3]);
         assert!(mailbox.take_all().is_empty());
+    }
+
+    #[test]
+    fn bgr_rows_with_padding_are_converted_safely() {
+        let image = Image::new(1, 2, "bgr8", 8, vec![3, 2, 1, 6, 5, 4, 99, 99].into()).unwrap();
+        assert_eq!(raw_image_to_rgb(&image).unwrap(), vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn mono_rows_are_expanded_to_rgb() {
+        let image = Image::new(1, 2, "mono8", 2, vec![7, 9].into()).unwrap();
+        assert_eq!(raw_image_to_rgb(&image).unwrap(), vec![7, 7, 7, 9, 9, 9]);
+    }
+
+    #[test]
+    fn depth_values_are_scaled_to_the_frame_maximum() {
+        let image = Image::new(1, 3, "16UC1", 6, vec![0, 0, 100, 0, 200, 0].into()).unwrap();
+        assert_eq!(
+            raw_image_to_rgb(&image).unwrap(),
+            vec![0, 0, 0, 128, 128, 128, 255, 255, 255]
+        );
+    }
+
+    #[test]
+    fn non_finite_float_pixels_render_as_black() {
+        let mut bytes = Vec::new();
+        for value in [f32::NAN, 1.0, 3.0] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        let image = Image::new(1, 3, "32FC1", 12, bytes.into()).unwrap();
+        assert_eq!(
+            raw_image_to_rgb(&image).unwrap(),
+            vec![0, 0, 0, 0, 0, 0, 255, 255, 255]
+        );
+    }
+
+    #[test]
+    fn oversized_raw_images_are_rejected_before_allocation() {
+        let image = Image {
+            width: u32::MAX,
+            height: 1,
+            encoding: "rgb8".to_owned(),
+            step: 0,
+            data: Vec::new().into(),
+        };
+        let error = raw_image_to_rgb(&image).unwrap_err();
+        assert!(error.contains("exceed the maximum"));
+    }
+
+    #[test]
+    fn forge_payload_size_is_checked_before_message_conversion() {
+        let raw = Image::new(1, 1, "rgb8", 3, vec![1, 2, 3].into())
+            .unwrap()
+            .to_record_batch()
+            .unwrap();
+        assert_eq!(forge_message_kind_and_payload_len(&raw).unwrap(), (true, 3));
+
+        let compressed = CompressedImage::new("jpeg", vec![1, 2, 3, 4].into())
+            .unwrap()
+            .to_record_batch()
+            .unwrap();
+        assert_eq!(
+            forge_message_kind_and_payload_len(&compressed).unwrap(),
+            (false, 4)
+        );
     }
 }

@@ -1,11 +1,11 @@
 # Image Viewer
 
-独立的 Rust/Dora 实时图像查看工具，基于 `eframe`/`egui` 显示一路或多路图像流。项目从 `forge_runtime` 抽离，作为可独立构建、测试和交付的 Viewer 节点维护。
+独立的 Rust/Dora 实时图像查看工具，基于 `eframe`/`egui` 显示一路或多路图像流。
 
 ## 支持范围
 
 - 输入 `forge_msgs.Image`：`rgb8`、`bgr8`、`mono8`、`16UC1`、`32FC1`。
-- 输入 `forge_msgs.CompressedImage`：JPEG、PNG（由当前 `forge_msgs` image features 提供）。
+- 输入 `forge_msgs.CompressedImage`：JPEG、PNG（使用受资源限制的 `image` 解码器）。
 - 兼容 legacy raw bytes，可在配置中指定宽、高、通道数及 BGR 排列。
 - 每路输入创建独立窗口，关闭某一路窗口后，本次运行会忽略该路后续帧。
 - 每路仅缓存最新待显示帧；渲染跟不上输入时主动丢弃旧帧，避免队列积压导致窗口卡死或延迟持续增长。
@@ -17,6 +17,10 @@
 image_viewer/
 ├── Cargo.toml
 ├── Cargo.lock
+├── LICENSE
+├── CHANGELOG.md
+├── CONTRIBUTING.md
+├── RELEASING.md
 ├── config/
 │   └── viewer.example.yaml
 ├── examples/
@@ -38,16 +42,16 @@ path: image_viewer
 
 ## 环境要求
 
-- 支持 Rust 2024 edition 的 stable toolchain；建议使用当前稳定版 Rust。
+- Rust 1.97.1 或更新的 stable 工具链。
 - Dora 运行环境。
-- 能访问内部 GitLab `https://gitlab.ex-ai.cn/meta-emt/framework/forge.git`；源码构建需要获取锁文件指定的 `forge_msgs` commit。直接使用 release 压缩包不需要源码仓库权限。
-- Linux 桌面环境：X11 或 Wayland。
+- 能访问 crates.io 以获取 `Cargo.lock` 固定的公开依赖；准备好 Cargo 缓存后可使用 `--offline` 构建。
+- Linux x86_64 桌面环境：X11 或 Wayland。
 - WGPU 模式需要可用的 Vulkan/图形驱动；Glow 模式需要可用的 OpenGL/GLX/EGL 驱动。
 
 Ubuntu/Debian 构建环境可安装：
 
 ```bash
-sudo apt install build-essential pkg-config libx11-dev libxkbcommon-dev \
+sudo apt install binutils build-essential file pkg-config libx11-dev libxkbcommon-dev \
   libwayland-dev libgl1-mesa-dev libvulkan1
 ```
 
@@ -95,7 +99,7 @@ install -Dm755 target/release/image_viewer ~/.local/bin/image_viewer
 bash scripts/package_release.sh
 ```
 
-脚本会使用锁文件进行 release 构建，清理旧 `dist/` 内容，并且只生成一个二进制文件：
+脚本使用锁文件和固定的 `x86_64-unknown-linux-gnu` target 进行 release 构建，清理旧 `dist/` 内容，并且只生成用户二进制：
 
 ```text
 dist/image_viewer
@@ -107,7 +111,7 @@ dist/image_viewer
 install -Dm755 dist/image_viewer ~/.local/bin/image_viewer
 ```
 
-该产物是动态链接的 Linux 二进制；目标机器仍需提供兼容的 glibc、X11/Wayland、Vulkan/OpenGL 驱动及 Dora 运行环境。建议在与部署机相同的 Linux 发行版和 CPU 架构上构建。
+该产物是动态链接的 Linux x86_64 二进制；当前发布基线为 glibc 2.39，目标机器还需提供 X11/Wayland、Vulkan/OpenGL 驱动及 Dora 运行环境。打包脚本使用 `file`、`readelf` 验证架构；发布前还需检查 `RPATH`/`RUNPATH`、缺失动态库及最高 GLIBC 符号要求。
 
 ## 配置
 
@@ -124,7 +128,7 @@ image_viewer --config image_viewer.yaml
 2. 环境变量：`IMAGE_VIEWER_CONFIG=/path/to/image_viewer.yaml`
 3. 内置默认配置
 
-显式传入的 CLI 或环境变量配置路径不存在、不可读或 YAML 非法时，程序会直接报错，不会静默回退到默认配置。
+显式传入的 CLI 或环境变量配置路径不存在、不可读、YAML 非法或包含未知字段时，程序会直接报错，不会静默回退到默认配置。宽、高、通道数、重复 input 等非法值也会在 Dora 初始化前被拒绝。
 
 示例：
 
@@ -144,7 +148,7 @@ channels: 3
 bgr: false
 ```
 
-CLI 参数：
+CLI 参数可通过 `image_viewer --help` 查看：
 
 - `--version`：输出 `image_viewer` 版本并退出。
 - `--config <PATH>`：配置文件路径。
@@ -158,6 +162,19 @@ CLI 参数：
 ```text
 --renderer > YAML renderer > wgpu
 ```
+
+## 资源限制
+
+为避免异常消息导致整数溢出、无界内存分配或过量原生窗口，运行时执行以下限制：
+
+- 单边最大 `8192` 像素，且总像素数不超过 `33,554,432`。
+- 原始图像数据最大 `128 MiB`；压缩输入最大 `64 MiB`。
+- JPEG/PNG 解码器分配预算最大 `128 MiB`。
+- 每个进程最多接受 `16` 个成功解码的不同 input ID，ID 最长 `256` 字节。
+- 待显示 RGB mailbox 总量不超过 `256 MiB`，现存纹理总量不超过 `67,108,864` 像素。
+- legacy raw bytes 仅接受 `1` 或 `3` 通道，数据长度必须与配置完全一致。
+
+超出限制的帧会被拒绝；同一路 input 的首个解码错误会写入标准错误。
 
 ## Dora 示例
 
@@ -212,17 +229,23 @@ journalctl -k -b | grep -Ei 'nvrm|xid|nvidia'
 cargo test --locked
 ```
 
-格式与静态检查：
+格式、静态检查与依赖审计：
 
 ```bash
 cargo fmt --check
 cargo clippy --all-targets --locked -- -D warnings
+cargo audit
 ```
 
-`tests/delivery_paths.rs` 会校验配置、示例、打包脚本命令、归档命名以及稳定的 package/binary 名称，避免交付路径在重构时意外失效。
+`tests/delivery_paths.rs` 会校验严格 CLI 行为、配置、示例、打包脚本及稳定的 package/binary 名称，避免交付路径在重构时意外失效。
 
 ## 已知限制
 
 - 必须运行在可创建原生窗口的桌面会话中；纯 headless 环境不会自动降级为无界面 sink。
 - 同一进程内不能通过再次调用 `eframe::run_native` 自动重建 `winit` EventLoop，因此后端 fallback 由配置或 CLI 显式选择。
 - legacy raw bytes 的数据长度必须与 `width * height * channels` 完全一致。
+- 后台 Dora 接收由 Dora event stream 驱动；进程退出时，操作系统负责终止仍阻塞在接收调用中的后台线程。
+
+## 许可证
+
+本项目由 X-ERA 以 Apache License 2.0 发布，完整文本见 `LICENSE`。依赖许可证在依赖变更和发布 review 中审计；项目许可证与源码材料由仓库及 GitHub 自动生成的 source archive 提供。
