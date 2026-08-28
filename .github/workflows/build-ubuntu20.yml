@@ -1,0 +1,95 @@
+name: Build Ubuntu 20.04 binary
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to build
+        required: true
+        default: v1.0.1
+      version:
+        description: Image viewer version without the v prefix
+        required: true
+        default: 1.0.1
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:20.04
+    env:
+      RELEASE_VERSION: ${{ inputs.version }}
+    steps:
+      - name: Install system tools
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            binutils \
+            build-essential \
+            ca-certificates \
+            curl \
+            file \
+            git \
+            libgl1-mesa-dev \
+            libvulkan1 \
+            libwayland-dev \
+            libx11-dev \
+            libxkbcommon-dev \
+            pkg-config
+          rm -rf /var/lib/apt/lists/*
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.1"
+
+      - name: Build and package release binary
+        run: bash scripts/package_release.sh
+
+      - name: Verify and package archive
+        run: |
+          test "${{ inputs.ref }}" = "v${RELEASE_VERSION}"
+          ./dist/image_viewer --version | tee /tmp/version.txt
+          grep -q "${RELEASE_VERSION}" /tmp/version.txt
+          file ./dist/image_viewer | grep -q 'ELF 64-bit LSB'
+          test -z "$(ldd ./dist/image_viewer | grep 'not found' || true)"
+          max_glibc="$(objdump -T ./dist/image_viewer |
+            grep -oE 'GLIBC_[0-9.]+' | sort -Vu | tail -1)"
+          echo "max glibc symbol version: ${max_glibc}"
+          test "$(printf '%s\n' '2.31' "${max_glibc#GLIBC_}" |
+            sort -V | tail -1)" = "2.31"
+          if strings ./dist/image_viewer |
+            grep -E '/home/|gitlab\.ex-ai\.cn|git\+ssh://|ssh://'; then
+            echo "ERROR: private build markers found in binary" >&2
+            exit 1
+          fi
+          ldd --version | sed -n '1p'
+          archive="image_viewer-v${RELEASE_VERSION}-ubuntu20.04-x86_64.tar.gz"
+          tar \
+            --sort=name \
+            --mtime='UTC 1970-01-01' \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            -C dist \
+            -czf "${archive}" \
+            image_viewer
+          sha256sum "${archive}" > "${archive}.sha256"
+          test "$(tar -tzf "${archive}")" = "image_viewer"
+          sha256sum --check "${archive}.sha256"
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: image_viewer-v${{ inputs.version }}-ubuntu20.04-x86_64
+          path: |
+            image_viewer-v${{ inputs.version }}-ubuntu20.04-x86_64.tar.gz
+            image_viewer-v${{ inputs.version }}-ubuntu20.04-x86_64.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 30
