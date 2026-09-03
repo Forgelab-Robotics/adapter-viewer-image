@@ -4,7 +4,6 @@ mod config;
 
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
-use std::ops::Deref;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -15,7 +14,7 @@ use config::{
     load_config_file, resolve_settings, validate_image_dimensions,
 };
 
-use dora_node_api::{DoraNode, Event, EventStream};
+use dora_node_api::{DoraArray, DoraNode, Event, EventStream};
 use eframe::egui;
 use forge_msgs::{CompressedImage, Image};
 use image::{ImageFormat, ImageReader};
@@ -69,8 +68,8 @@ impl FrameMailbox {
     }
 }
 
-fn arrow_to_record_batch(data: &dora_node_api::ArrowData) -> Option<RecordBatch> {
-    let arr = data.deref();
+fn arrow_to_record_batch(data: &DoraArray) -> Option<RecordBatch> {
+    let arr = data.as_array();
     let sa = arr.as_any().downcast_ref::<StructArray>()?;
     Some(RecordBatch::from(sa.clone()))
 }
@@ -322,10 +321,10 @@ fn grayscale_f32_to_rgb(values: &[f32]) -> Result<Vec<u8>, String> {
 }
 
 fn try_decode_legacy_bytes(
-    data: &dora_node_api::ArrowData,
+    data: &DoraArray,
     settings: &ResolvedSettings,
 ) -> Result<(u32, u32, Vec<u8>), String> {
-    let array = data.deref();
+    let array = data.as_array();
     let bytes: &[u8] = if let Some(array) = array.as_any().downcast_ref::<LargeBinaryArray>() {
         if array.is_empty() || array.is_null(0) {
             return Err("legacy LargeBinary input is empty or null".to_owned());
@@ -372,7 +371,7 @@ fn try_decode_legacy_bytes(
 }
 
 fn decode_input(
-    data: &dora_node_api::ArrowData,
+    data: &DoraArray,
     settings: &ResolvedSettings,
 ) -> Result<(u32, u32, Vec<u8>), String> {
     match arrow_to_record_batch(data) {

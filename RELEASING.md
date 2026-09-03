@@ -16,12 +16,21 @@ Release from a clean, reviewed commit using Rust 1.97.1 or newer:
 cargo fmt --all -- --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked
-cargo audit
+cargo audit --ignore RUSTSEC-2026-0041
 cargo package --locked
 bash scripts/package_release.sh
 ```
 
 Complete and record an applicable Dora image-stream smoke test using both the default WGPU renderer and the Glow fallback when supported by the release host.
+
+The Dora 1.0 migration branch is not publishable while `forge_msgs` is pinned to
+Forge commit `20561e7`. Publish `forge_msgs 2.0.0`, replace the Git dependency with
+the crates.io release, regenerate `Cargo.lock`, and restore successful full
+`cargo package --locked` verification before releasing Image Viewer 2.0.0.
+
+Dora 1.0.0 currently resolves `lz4_flex 0.10.0`; the affected compression path
+is not enabled in this build, so RustSec uses the same targeted
+`RUSTSEC-2026-0041` exception as the USB Camera migration.
 
 ## Source release
 
