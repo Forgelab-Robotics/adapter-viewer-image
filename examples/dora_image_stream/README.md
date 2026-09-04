@@ -15,7 +15,7 @@ USB/UVC camera -> forge_msgs.Image/CompressedImage -> image_viewer
    ```
 
 2. 从 USB Camera 的 Dora 1.0 migration 分支构建 `usb_camera`，并将其加入 `PATH`。
-3. 安装 Dora CLI `1.0.0`；Dora 0.x 与 1.x 节点不能互通。
+3. 安装兼容的 Dora CLI 1.x（当前验证基线为 1.0.1）；Dora 0.x 与 1.x 节点不能互通。
 4. 根据实际设备修改 `camera.yaml` 中的 `/dev/video0`。
 
 ## 运行

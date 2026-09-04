@@ -154,7 +154,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -165,7 +165,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -855,7 +855,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1270,7 +1270,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1322,9 +1322,9 @@ dependencies = [
 
 [[package]]
 name = "dora-arrow-convert"
-version = "1.0.0"
+version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "145f7713137714de6a6737686e2bf50f8267cd0c974bdd0c57a0f68b99b47abd"
+checksum = "990ed87f7cd713737fa882dc17946aa990d748ba80e0e772a00f627565b5f6ca"
 dependencies = [
  "arrow",
  "chrono",
@@ -1336,9 +1336,9 @@ dependencies = [
 
 [[package]]
 name = "dora-core"
-version = "1.0.0"
+version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d9e4e82a2c3fe21cf34d7a969956039470089b850c8712b76b043d210115a44"
+checksum = "cdcdbbffa579efaa597adb1fc65951d3d8406f00ebb8101c68d2926d5646cad5"
 dependencies = [
  "arrow-schema",
  "dora-message",
@@ -1365,9 +1365,9 @@ dependencies = [
 
 [[package]]
 name = "dora-message"
-version = "1.0.0"
+version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f4e3a6a689585b5072792dbdc9a0463a52e03026496c5a5d3e298d5db4d2ad10"
+checksum = "e7e9d121ba87b8080aca4654942db497866d1426ce4d5338b235fe5f8043afc4"
 dependencies = [
  "aligned-vec",
  "arrow-data",
@@ -1392,9 +1392,9 @@ dependencies = [
 
 [[package]]
 name = "dora-metrics"
-version = "1.0.0"
+version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9707b4747e8710abcfec9baa4b5f718b2569a32c3e1cc1c2d9d7d08dca22fd62"
+checksum = "7ef4ee9021d2b0ce6eb12558a9e3abaf31a0ce92f632d56b2290f22c076fca26"
 dependencies = [
  "eyre",
  "opentelemetry",
@@ -1405,9 +1405,9 @@ dependencies = [
 
 [[package]]
 name = "dora-node-api"
-version = "1.0.0"
+version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c927aa07759905572d878c3b45d1d4da8285dcd671d887c2b4792b6ce9cc4fe"
+checksum = "729e2dfff63c8cef8af0d68309d4420b8e860d3a5aea5b962ef369ae7aeb529f"
 dependencies = [
  "aligned-vec",
  "arrow",
@@ -1442,9 +1442,9 @@ dependencies = [
 
 [[package]]
 name = "dora-tracing"
-version = "1.0.0"
+version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f71b2376bc110b9766fa2d7aeda11e81be46abc0c63e9a9f777949dcd9cc708b"
+checksum = "3a43815618912ad29a80457eb00a11e9d0d6dc2776f9730536ef80d88870fc92"
 dependencies = [
  "eyre",
  "opentelemetry",
@@ -1688,7 +1688,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1868,7 +1868,7 @@ dependencies = [
 [[package]]
 name = "forge_msgs"
 version = "2.0.0"
-source = "git+https://github.com/Forgelab-Robotics/forge.git?rev=ca2301752583544d0d87ce28cbcfd51e02a3bfc7#ca2301752583544d0d87ce28cbcfd51e02a3bfc7"
+source = "git+https://github.com/Forgelab-Robotics/forge.git?rev=dd3501b327dc97cd778d00d4d26fe7f77a88b2f1#dd3501b327dc97cd778d00d4d26fe7f77a88b2f1"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -2701,7 +2701,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3345,7 +3345,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4358,7 +4358,7 @@ dependencies = [
  "once_cell",
  "socket2 0.6.5",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4719,7 +4719,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4786,7 +4786,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5089,7 +5089,7 @@ version = "3.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32824fab5e16e6c4d86dc1ba84489390419a39f97699852b66480bb87d297ed8"
 dependencies = [
- "dirs 4.0.0",
+ "dirs 6.0.0",
 ]
 
 [[package]]
@@ -5246,7 +5246,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6521,7 +6521,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
