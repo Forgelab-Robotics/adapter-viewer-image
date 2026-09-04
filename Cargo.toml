@@ -25,7 +25,7 @@ ctrlc = { version = "3.5.2", features = ["termination"] }
 dora-node-api = { version = "=1.0.0", features = ["arrow-v59"] }
 eframe = { version = "0.29.1", default-features = false, features = ["default_fonts", "glow", "wayland", "wgpu", "x11"] }
 eyre = "0.6.12"
-forge_msgs = { version = "2.0.0", git = "https://github.com/Forgelab-Robotics/forge.git", rev = "20561e7a124c2f4c6d91d1b84f472810340461aa" }
+forge_msgs = { version = "2.0.0", git = "https://github.com/Forgelab-Robotics/forge.git", rev = "ca2301752583544d0d87ce28cbcfd51e02a3bfc7" }
 image = { version = "0.25.9", default-features = false, features = ["jpeg", "png"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"

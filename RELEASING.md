@@ -24,7 +24,7 @@ bash scripts/package_release.sh
 Complete and record an applicable Dora image-stream smoke test using both the default WGPU renderer and the Glow fallback when supported by the release host.
 
 The Dora 1.0 migration branch is not publishable while `forge_msgs` is pinned to
-Forge commit `20561e7`. Publish `forge_msgs 2.0.0`, replace the Git dependency with
+Forge commit `ca23017`. Publish `forge_msgs 2.0.0`, replace the Git dependency with
 the crates.io release, regenerate `Cargo.lock`, and restore successful full
 `cargo package --locked` verification before releasing Image Viewer 2.0.0.
 

@@ -9,7 +9,7 @@ The project follows Semantic Versioning. Dates use the `YYYY-MM-DD` format.
 ### Changed
 
 - Migrated the viewer and USB camera example to Dora 1.0 and Arrow 59.
-- Updated `forge_msgs` to the Forge 2.0 candidate at commit `20561e7`.
+- Updated `forge_msgs` to the coordinated Forge 2.0 candidate at commit `ca23017`.
 - Raised the package version to 2.0.0 because Dora 0.x and 1.x nodes cannot interoperate.
 
 ## 1.0.1 - 2026-08-17

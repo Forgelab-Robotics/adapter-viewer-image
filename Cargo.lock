@@ -1868,7 +1868,7 @@ dependencies = [
 [[package]]
 name = "forge_msgs"
 version = "2.0.0"
-source = "git+https://github.com/Forgelab-Robotics/forge.git?rev=20561e7a124c2f4c6d91d1b84f472810340461aa#20561e7a124c2f4c6d91d1b84f472810340461aa"
+source = "git+https://github.com/Forgelab-Robotics/forge.git?rev=ca2301752583544d0d87ce28cbcfd51e02a3bfc7#ca2301752583544d0d87ce28cbcfd51e02a3bfc7"
 dependencies = [
  "arrow-array",
  "arrow-schema",
