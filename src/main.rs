@@ -4,7 +4,6 @@ mod config;
 
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
-use std::ops::Deref;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -15,7 +14,7 @@ use config::{
     load_config_file, resolve_settings, validate_image_dimensions,
 };
 
-use dora_node_api::{DoraNode, Event, EventStream};
+use dora_node_api::{DoraArray, DoraNode, Event, EventStream};
 use eframe::egui;
 use forge_msgs::{CompressedImage, Image};
 use image::{ImageFormat, ImageReader};
@@ -69,8 +68,8 @@ impl FrameMailbox {
     }
 }
 
-fn arrow_to_record_batch(data: &dora_node_api::ArrowData) -> Option<RecordBatch> {
-    let arr = data.deref();
+fn arrow_to_record_batch(data: &DoraArray) -> Option<RecordBatch> {
+    let arr = data.as_array();
     let sa = arr.as_any().downcast_ref::<StructArray>()?;
     Some(RecordBatch::from(sa.clone()))
 }
@@ -213,7 +212,7 @@ fn raw_image_to_rgb(image: &Image) -> Result<Vec<u8>, String> {
                 .ok_or_else(|| "BGR row length overflow".to_owned())?;
             let mut rgb = allocate_rgb(pixel_count)?;
             for y in 0..height {
-                for pixel in image_row(data, y, step, row_len)?.chunks_exact(3) {
+                for pixel in image_row(data, y, step, row_len)?.as_chunks::<3>().0 {
                     rgb.extend([pixel[2], pixel[1], pixel[0]]);
                 }
             }
@@ -255,7 +254,7 @@ fn read_u16_image(
         .try_reserve_exact(pixel_count)
         .map_err(|error| format!("failed to allocate 16UC1 values: {error}"))?;
     for y in 0..height {
-        for chunk in image_row(data, y, step, row_len)?.chunks_exact(2) {
+        for chunk in image_row(data, y, step, row_len)?.as_chunks::<2>().0 {
             values.push(u16::from_le_bytes([chunk[0], chunk[1]]));
         }
     }
@@ -277,7 +276,7 @@ fn read_f32_image(
         .try_reserve_exact(pixel_count)
         .map_err(|error| format!("failed to allocate 32FC1 values: {error}"))?;
     for y in 0..height {
-        for chunk in image_row(data, y, step, row_len)?.chunks_exact(4) {
+        for chunk in image_row(data, y, step, row_len)?.as_chunks::<4>().0 {
             values.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
         }
     }
@@ -322,10 +321,10 @@ fn grayscale_f32_to_rgb(values: &[f32]) -> Result<Vec<u8>, String> {
 }
 
 fn try_decode_legacy_bytes(
-    data: &dora_node_api::ArrowData,
+    data: &DoraArray,
     settings: &ResolvedSettings,
 ) -> Result<(u32, u32, Vec<u8>), String> {
-    let array = data.deref();
+    let array = data.as_array();
     let bytes: &[u8] = if let Some(array) = array.as_any().downcast_ref::<LargeBinaryArray>() {
         if array.is_empty() || array.is_null(0) {
             return Err("legacy LargeBinary input is empty or null".to_owned());
@@ -361,7 +360,7 @@ fn try_decode_legacy_bytes(
             }
         }
         3 if settings.legacy_bgr => {
-            for pixel in bytes.chunks_exact(3) {
+            for pixel in bytes.as_chunks::<3>().0 {
                 rgb.extend([pixel[2], pixel[1], pixel[0]]);
             }
         }
@@ -372,7 +371,7 @@ fn try_decode_legacy_bytes(
 }
 
 fn decode_input(
-    data: &dora_node_api::ArrowData,
+    data: &DoraArray,
     settings: &ResolvedSettings,
 ) -> Result<(u32, u32, Vec<u8>), String> {
     match arrow_to_record_batch(data) {
