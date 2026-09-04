@@ -49,9 +49,8 @@ fn manifest_keeps_stable_package_and_binary_names() {
     assert!(manifest.contains("name = \"image_viewer\""));
     assert!(manifest.contains("license = \"Apache-2.0\""));
     assert!(manifest.contains("authors = [\"X-ERA\"]"));
-    assert!(manifest.contains("forge_msgs = { version = \"2.0.0\""));
-    assert!(manifest.contains("https://github.com/Forgelab-Robotics/forge.git"));
-    assert!(manifest.contains("dd3501b327dc97cd778d00d4d26fe7f77a88b2f1"));
+    assert!(manifest.contains("forge_msgs = \"2.0.0\""));
+    assert!(!manifest.contains("git ="));
     assert!(
         manifest
             .contains("repository = \"https://github.com/Forgelab-Robotics/adapter-viewer-image\"")
