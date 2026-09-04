@@ -10,6 +10,7 @@ The project follows Semantic Versioning. Dates use the `YYYY-MM-DD` format.
 
 - Migrated the viewer and USB camera example to the Dora 1.x line and Arrow 59; the current lock validates Dora 1.0.1.
 - Updated `forge_msgs` to the published Forge 2.0 crates.io release.
+- Updated the locked `h2` dependency to 0.4.19 to address `RUSTSEC-2026-0258`.
 - Raised the package version to 2.0.0 because Dora 0.x and 1.x nodes cannot interoperate.
 
 ## 1.0.1 - 2026-08-17

@@ -212,7 +212,7 @@ fn raw_image_to_rgb(image: &Image) -> Result<Vec<u8>, String> {
                 .ok_or_else(|| "BGR row length overflow".to_owned())?;
             let mut rgb = allocate_rgb(pixel_count)?;
             for y in 0..height {
-                for pixel in image_row(data, y, step, row_len)?.chunks_exact(3) {
+                for pixel in image_row(data, y, step, row_len)?.as_chunks::<3>().0 {
                     rgb.extend([pixel[2], pixel[1], pixel[0]]);
                 }
             }
@@ -254,7 +254,7 @@ fn read_u16_image(
         .try_reserve_exact(pixel_count)
         .map_err(|error| format!("failed to allocate 16UC1 values: {error}"))?;
     for y in 0..height {
-        for chunk in image_row(data, y, step, row_len)?.chunks_exact(2) {
+        for chunk in image_row(data, y, step, row_len)?.as_chunks::<2>().0 {
             values.push(u16::from_le_bytes([chunk[0], chunk[1]]));
         }
     }
@@ -276,7 +276,7 @@ fn read_f32_image(
         .try_reserve_exact(pixel_count)
         .map_err(|error| format!("failed to allocate 32FC1 values: {error}"))?;
     for y in 0..height {
-        for chunk in image_row(data, y, step, row_len)?.chunks_exact(4) {
+        for chunk in image_row(data, y, step, row_len)?.as_chunks::<4>().0 {
             values.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
         }
     }
@@ -360,7 +360,7 @@ fn try_decode_legacy_bytes(
             }
         }
         3 if settings.legacy_bgr => {
-            for pixel in bytes.chunks_exact(3) {
+            for pixel in bytes.as_chunks::<3>().0 {
                 rgb.extend([pixel[2], pixel[1], pixel[0]]);
             }
         }
