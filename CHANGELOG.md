@@ -6,6 +6,8 @@ The project follows Semantic Versioning. Dates use the `YYYY-MM-DD` format.
 
 ## Unreleased
 
+## 2.0.0 - 2026-09-04
+
 ### Changed
 
 - Migrated the viewer and USB camera example to the Dora 1.x line and Arrow 59; the current lock validates Dora 1.0.1.

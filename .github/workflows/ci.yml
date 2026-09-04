@@ -43,13 +43,7 @@ jobs:
         run: cargo test --locked
 
       - name: Validate package
-        run: |
-          if grep -q 'forge_msgs = {.*git = ' Cargo.toml; then
-            cargo package --locked --list
-            echo "::notice::Full package verification is blocked until forge_msgs 2.0.0 is published."
-          else
-            cargo package --locked
-          fi
+        run: cargo package --locked
 
   security:
     name: RustSec audit
