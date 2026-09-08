@@ -2,6 +2,8 @@
 
 独立的 Rust/Dora 实时图像查看工具，基于 `eframe`/`egui` 显示一路或多路图像流。
 
+当前版本：`2.1.0`。
+
 ## 支持范围
 
 - 输入 `forge_msgs.Image`：`rgb8`、`bgr8`、`mono8`、`16UC1`、`32FC1`。

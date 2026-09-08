@@ -6,6 +6,8 @@ The project follows Semantic Versioning. Dates use the `YYYY-MM-DD` format.
 
 ## Unreleased
 
+## 2.1.0 - 2026-09-08
+
 ### Added
 
 - Add opt-in publish/receive latency observation with `FORGE_OBSERVABILITY=1`, using the published `forgelab_common 2.1.0` crate. Report bounded hop/end-to-end interval aggregates and diagnostics without including decoding or display time.

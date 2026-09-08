@@ -23,9 +23,11 @@ bash scripts/package_release.sh
 
 Complete and record an applicable Dora image-stream smoke test using both the default WGPU renderer and the Glow fallback when supported by the release host.
 
-Image Viewer 2.0.0 resolves the published `forge_msgs 2.0.0` crate from
-crates.io. Keep `Cargo.lock` on registry sources and require successful
-release-package verification before creating the 2.0.0 tag.
+Image Viewer 2.1.0 resolves the published `forge_msgs 2.0.0` and
+`forgelab_common 2.1.0` crates from crates.io. Keep `Cargo.lock` on registry
+sources and require successful release-package verification before creating
+the release tag. This application is distributed through source tags and
+GitHub binary assets, not crates.io.
 
 The Dora 1.0.1 lock currently resolves `lz4_flex 0.10.0`; the affected compression path
 is not enabled in this build, so RustSec uses the same targeted
