@@ -18,6 +18,10 @@ The project follows Semantic Versioning. Dates use the `YYYY-MM-DD` format.
 - Bound pending input count and visible Arrow buffer storage, account for shared allocations once per message, discard pending work on stop, and report replacement totals. Keep successful-image admission and bounded decode warnings.
 - Keep standard Dora input mappings in examples; no `queue_size` or queue-policy override is required. Intermediate frames may be dropped for freshness, without increasing decode throughput or claiming screen-display latency.
 
+### Fixed
+
+- Apply specific source and Cargo path remaps after the home-directory fallback so release binaries do not retain private build-directory layouts.
+
 ## 2.0.0 - 2026-09-04
 
 ### Changed

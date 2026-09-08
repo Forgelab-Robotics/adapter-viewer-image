@@ -165,6 +165,14 @@ fn package_script_matches_delivery_contract() {
             < script.find("cargo build --release").unwrap()
     );
     assert!(script.contains("unset CARGO_BUILD_TARGET CARGO_ENCODED_RUSTFLAGS"));
+    let home_remap = script
+        .find("--remap-path-prefix=${HOME_DIR}=/build")
+        .unwrap();
+    let cargo_remap = script
+        .find("--remap-path-prefix=${CARGO_HOME_DIR}=/cargo")
+        .unwrap();
+    let source_remap = script.find("--remap-path-prefix=${ROOT_DIR}=.").unwrap();
+    assert!(home_remap < cargo_remap && home_remap < source_remap);
     assert!(script.contains("ARTIFACT=\"${DIST_DIR}/image_viewer\""));
     assert!(script.contains("install -m 0755"));
     assert!(!script.contains("tar "));

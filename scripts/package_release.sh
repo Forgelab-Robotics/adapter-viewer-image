@@ -15,7 +15,8 @@ export LC_ALL=C
 export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-0}"
 export CARGO_TARGET_DIR="${ROOT_DIR}/target"
 unset CARGO_BUILD_TARGET CARGO_ENCODED_RUSTFLAGS
-export RUSTFLAGS="--remap-path-prefix=${CARGO_HOME_DIR}=/cargo --remap-path-prefix=${ROOT_DIR}=. --remap-path-prefix=${HOME_DIR}=/build"
+# Rust uses the last matching prefix; keep specific paths after the home fallback.
+export RUSTFLAGS="--remap-path-prefix=${HOME_DIR}=/build --remap-path-prefix=${CARGO_HOME_DIR}=/cargo --remap-path-prefix=${ROOT_DIR}=."
 
 rm -rf "${DIST_DIR}"
 trap 'rm -rf "${DIST_DIR}"' ERR
