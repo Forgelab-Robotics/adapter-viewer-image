@@ -1,6 +1,9 @@
 //! Dora 图像查看节点：Arrow `forge_msgs.Image` / `CompressedImage` + legacy bytes，eframe/egui 显示。
 
 mod config;
+mod input_size;
+mod latest;
+mod observability;
 
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
@@ -23,6 +26,7 @@ const MAX_COMPRESSED_BYTES: usize = 64 * 1024 * 1024;
 const MAX_RAW_BYTES: usize = 128 * 1024 * 1024;
 const MAX_DECODE_ALLOC_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_PENDING_RGB_BYTES: usize = 256 * 1024 * 1024;
+const MAX_PENDING_INPUT_BYTES: usize = 256 * 1024 * 1024;
 const MAX_TOTAL_TEXTURE_PIXELS: usize = 64 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -390,20 +394,121 @@ fn input_allowed(id: &str, filter: &Option<Vec<String>>) -> bool {
     }
 }
 
+struct CloseDecodeQueue(Arc<latest::LatestMailbox<DoraArray>>);
+
+impl Drop for CloseDecodeQueue {
+    fn drop(&mut self) {
+        self.0.close();
+    }
+}
+
+fn run_decode_thread(
+    pending: &latest::LatestMailbox<DoraArray>,
+    frames: &FrameMailbox,
+    settings: &ResolvedSettings,
+    stop: &AtomicBool,
+    egui_ctx: &egui::Context,
+    active_ids: &Mutex<HashSet<String>>,
+) {
+    let mut decode_warned_ids = HashSet::new();
+    let mut decode_warning_limit_warned = false;
+    let mut mailbox_limit_warned = false;
+    while let Some((id, data)) = pending.take() {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        {
+            let active = active_ids
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !active.contains(&id) && active.len() >= MAX_INPUTS {
+                continue;
+            }
+        }
+        let decoded = decode_input(&data, settings);
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        match decoded {
+            Ok((width, height, rgb)) => {
+                active_ids
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(id.clone());
+                if frames.publish(id, ImageFrame { width, height, rgb }) {
+                    egui_ctx.request_repaint_of(egui::ViewportId::ROOT);
+                } else if !mailbox_limit_warned {
+                    eprintln!(
+                        "[image_viewer] dropping frames after reaching the {MAX_PENDING_RGB_BYTES}-byte pending-frame limit"
+                    );
+                    mailbox_limit_warned = true;
+                }
+            }
+            Err(error) => {
+                if decode_warned_ids.len() < MAX_INPUTS {
+                    if decode_warned_ids.insert(id.clone()) {
+                        eprintln!("[image_viewer] failed to decode input `{id}`: {error}");
+                    }
+                } else if !decode_warning_limit_warned {
+                    eprintln!(
+                        "[image_viewer] suppressing decode warnings after {MAX_INPUTS} distinct failing input IDs"
+                    );
+                    decode_warning_limit_warned = true;
+                }
+            }
+        }
+    }
+}
+
 fn run_dora_thread(
     mut events: EventStream,
     frames: Arc<FrameMailbox>,
     settings: ResolvedSettings,
     stop: Arc<AtomicBool>,
     egui_ctx: egui::Context,
+    observer: Option<Arc<forge_common::observability::Observer>>,
 ) {
     let wake = || egui_ctx.request_repaint_of(egui::ViewportId::ROOT);
-    let mut active_ids = HashSet::new();
-    let mut decode_warned_ids = HashSet::new();
-    let mut decode_warning_limit_warned = false;
-    let mut input_limit_warned = false;
-    let mut mailbox_limit_warned = false;
+    let pending = Arc::new(latest::LatestMailbox::new(
+        MAX_INPUTS,
+        MAX_PENDING_INPUT_BYTES,
+    ));
+    // Wake the decoder even if receiving unwinds before normal shutdown.
+    let close_pending = CloseDecodeQueue(Arc::clone(&pending));
+    let active_ids = Arc::new(Mutex::new(HashSet::new()));
+    let decoder = {
+        let pending = Arc::clone(&pending);
+        let stop = Arc::clone(&stop);
+        let ctx = egui_ctx.clone();
+        let settings = settings.clone();
+        let active_ids = Arc::clone(&active_ids);
+        std::thread::Builder::new()
+            .name("image-viewer-decode".into())
+            .spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_decode_thread(&pending, &frames, &settings, &stop, &ctx, &active_ids);
+                }));
+                if result.is_err() {
+                    stop.store(true, Ordering::Relaxed);
+                    pending.close();
+                    ctx.request_repaint_of(egui::ViewportId::ROOT);
+                    eprintln!("[image_viewer] decode worker thread panicked");
+                }
+            })
+    };
+    let decoder = match decoder {
+        Ok(decoder) => decoder,
+        Err(error) => {
+            stop.store(true, Ordering::Relaxed);
+            wake();
+            eprintln!("[image_viewer] failed to start decode worker: {error}");
+            return;
+        }
+    };
 
+    let mut input_limit_warned = false;
+    let mut pending_limit_warned = false;
+    let mut replaced = 0_u64;
     loop {
         if stop.load(Ordering::Relaxed) {
             break;
@@ -412,14 +517,21 @@ fn run_dora_thread(
             Some(e) => e,
             None => break,
         };
-
         match event {
-            Event::Input { id, data, .. } => {
-                let id_str = id.as_str().to_string();
-                if !input_allowed(&id_str, &settings.filter_ids) {
+            Event::Input { id, metadata, data } => {
+                if let Some(observer) = &observer {
+                    observability::observe(observer.as_ref(), id.as_str(), &metadata.parameters);
+                }
+                if !input_allowed(id.as_str(), &settings.filter_ids) {
                     continue;
                 }
-                if !active_ids.contains(&id_str) && active_ids.len() >= MAX_INPUTS {
+                let at_input_limit = {
+                    let active = active_ids
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    !active.contains(id.as_str()) && active.len() >= MAX_INPUTS
+                };
+                if at_input_limit {
                     if !input_limit_warned {
                         eprintln!(
                             "[image_viewer] ignoring additional inputs after reaching the {MAX_INPUTS}-input limit"
@@ -428,50 +540,38 @@ fn run_dora_thread(
                     }
                     continue;
                 }
-                match decode_input(&data, &settings) {
-                    Ok((width, height, rgb)) => {
-                        active_ids.insert(id_str.clone());
-                        if frames.publish(id_str, ImageFrame { width, height, rgb }) {
-                            wake();
-                        } else if !mailbox_limit_warned {
+                let bytes = input_size::retained_buffer_bytes(data.as_array());
+                let id = id.as_str().to_owned();
+                match pending.publish(id.clone(), data, bytes) {
+                    latest::PublishResult::Queued => {}
+                    latest::PublishResult::Replaced => {
+                        replaced = replaced.saturating_add(1);
+                    }
+                    latest::PublishResult::Rejected => {
+                        if !pending_limit_warned {
                             eprintln!(
-                                "[image_viewer] dropping frames after reaching the {MAX_PENDING_RGB_BYTES}-byte pending-frame limit"
+                                "[image_viewer] dropping inputs after reaching the {MAX_PENDING_INPUT_BYTES}-byte undecoded-frame limit"
                             );
-                            mailbox_limit_warned = true;
+                            pending_limit_warned = true;
                         }
                     }
-                    Err(error) => {
-                        if decode_warned_ids.len() < MAX_INPUTS {
-                            if decode_warned_ids.insert(id_str.clone()) {
-                                eprintln!(
-                                    "[image_viewer] failed to decode input `{id_str}`: {error}"
-                                );
-                            }
-                        } else if !decode_warning_limit_warned {
-                            eprintln!(
-                                "[image_viewer] suppressing decode warnings after {MAX_INPUTS} distinct failing input IDs"
-                            );
-                            decode_warning_limit_warned = true;
-                        }
-                    }
+                    latest::PublishResult::Closed => break,
                 }
             }
-            Event::Stop(_) => {
-                stop.store(true, Ordering::Relaxed);
-                wake();
-                break;
-            }
+            Event::Stop(_) => break,
             Event::Error(msg) => {
                 eprintln!("[image_viewer] error: {msg}");
-                stop.store(true, Ordering::Relaxed);
-                wake();
                 break;
             }
             _ => {}
         }
     }
     stop.store(true, Ordering::Relaxed);
+    drop(close_pending);
+    eprintln!("[image_viewer] latest-only replaced_before_decode={replaced}");
     wake();
+    // Notify the UI before waiting for in-flight work; never decode the backlog on stop.
+    let _ = decoder.join();
 }
 
 fn install_shutdown_signal_handler(stop: Arc<AtomicBool>, egui_ctx: egui::Context) {
@@ -766,6 +866,10 @@ fn run(cli: CliArgs) -> eyre::Result<()> {
     };
 
     let (node, events) = DoraNode::init_from_env()?;
+    let observation = observability::Observation::from_env();
+    let observer = observation
+        .as_ref()
+        .map(observability::Observation::observer);
 
     let frames = Arc::new(FrameMailbox::default());
     let stop = Arc::new(AtomicBool::new(false));
@@ -796,7 +900,14 @@ fn run(cli: CliArgs) -> eyre::Result<()> {
                     let panic_stop = Arc::clone(&stop_bg);
                     let panic_ctx = egui_ctx.clone();
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        run_dora_thread(events, frames_bg, settings_clone, stop_bg, egui_ctx);
+                        run_dora_thread(
+                            events,
+                            frames_bg,
+                            settings_clone,
+                            stop_bg,
+                            egui_ctx,
+                            observer,
+                        );
                     }));
                     if result.is_err() {
                         eprintln!("[image_viewer] Dora worker thread panicked");

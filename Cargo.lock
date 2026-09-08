@@ -1860,6 +1860,7 @@ dependencies = [
  "eframe",
  "eyre",
  "forge_msgs",
+ "forgelab_common",
  "image",
  "serde",
  "serde_yaml",
@@ -1878,6 +1879,16 @@ dependencies = [
  "ndarray",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "forgelab_common"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32fa860fd109f322e0624bf90dd6fe86df55545a0b1f491c434b70e054c206ef"
+dependencies = [
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

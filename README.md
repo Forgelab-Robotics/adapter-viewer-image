@@ -8,7 +8,7 @@
 - 输入 `forge_msgs.CompressedImage`：JPEG、PNG（使用受资源限制的 `image` 解码器）。
 - 兼容 legacy raw bytes，可在配置中指定宽、高、通道数及 BGR 排列。
 - 每路输入创建独立窗口，关闭某一路窗口后，本次运行会忽略该路后续帧。
-- 每路仅缓存最新待显示帧；渲染跟不上输入时主动丢弃旧帧，避免队列积压导致窗口卡死或延迟持续增长。
+- Viewer 内置 latest-only：接收线程在解码前按 input 覆盖旧的待处理帧，独立解码线程只取每路最新帧；UI mailbox 仍只保留每路最新待显示帧，不依赖 Dora 队列配置。
 - 双渲染后端：默认 WGPU（Linux 通常走 Vulkan），可切换到 Glow/OpenGL。
 
 ## 项目结构
@@ -29,6 +29,9 @@ image_viewer/
 │   └── package_release.sh
 ├── src/
 │   ├── config.rs
+│   ├── input_size.rs
+│   ├── latest.rs
+│   ├── observability.rs
 │   └── main.rs
 └── tests/
     └── delivery_paths.rs
@@ -163,12 +166,41 @@ CLI 参数可通过 `image_viewer --help` 查看：
 --renderer > YAML renderer > wgpu
 ```
 
+## 可选延迟观测
+
+仅 `FORGE_OBSERVABILITY=1` 启用。Viewer 在 Dora INPUT 到达后、过滤/解码/mailbox
+之前读取 Forge v1 metadata，统计 `forge_hop_latency_seconds` 和
+`forge_e2e_latency_seconds`。计数包含之后被过滤或解码失败的 INPUT，不能当作显示帧数。
+没有 metadata 的旧发送端仍可用，只记录 `missing_context`，不伪造零延迟。
+
+- 摄像头和 Viewer 均需开启；摄像头以本次 publish 为 origin，因此直连时 hop 与 E2E 相同。
+- 观测不包含相机采集到 publish 的时间，也不包含 Viewer 的解码、排队、纹理更新或物理显示。
+- 每 5 秒在独立线程向 stdout 输出区间聚合和有界诊断，输入停止时仍输出空区间。
+- 指标名称遵循 seconds 约定，但本地文本的 `sum_ns/min_ns/max_ns/le_ns` 明确使用纳秒；
+  平均毫秒为 `sum_ns / count / 1_000_000`。桶是累积上界，不能从中声称精确 P99。
+- 退出时尝试导出最后区间，最多等待 250 ms；慢/断开的日志读取端可能导致日志丢失。
+  这不是可靠持久化 exporter，也没有端到端性能预算保证。
+- 默认关闭，不创建观测线程、不读取观测时钟。该开关不影响 Arrow schema 和业务处理。
+
+本项目依赖 crates.io 上的 `forgelab_common >=2.1.0,<3`，`Cargo.lock` 固定具体版本，
+不需要本地 Common 源码或 patch。无论是否启用运行时观测，都使用相同构建方式：
+
+```bash
+cargo build --locked --bin image_viewer
+cargo test --locked
+cargo clippy --locked --all-targets --all-features -- -D warnings
+```
+
+实际 dataflow 的观测配置见
+[`examples/dora_image_stream/README.md`](examples/dora_image_stream/README.md#延迟观测)。
+
 ## 资源限制
 
 为避免异常消息导致整数溢出、无界内存分配或过量原生窗口，运行时执行以下限制：
 
 - 单边最大 `8192` 像素，且总像素数不超过 `33,554,432`。
 - 原始图像数据最大 `128 MiB`；压缩输入最大 `64 MiB`。
+- 解码前最多 `16` 路待处理帧，每路一帧，可见 Arrow backing buffers 的估算总量上限 `256 MiB`；同一消息中的共享分配去重计量。外部 allocator 的隐藏容量不可知，因此这不是精确 RSS 上限。正在解码的一帧独立于待处理预算。
 - JPEG/PNG 解码器分配预算最大 `128 MiB`。
 - 每个进程最多接受 `16` 个成功解码的不同 input ID，ID 最长 `256` 字节。
 - 待显示 RGB mailbox 总量不超过 `256 MiB`，现存纹理总量不超过 `67,108,864` 像素。
@@ -187,6 +219,27 @@ dora run dataflow.yaml
 ```
 
 根据设备修改 `camera.yaml`。该示例固定引用 `target/debug/image_viewer`；release 部署建议将 dataflow 中的 path 改为已安装到 `PATH` 的 `image_viewer`。
+
+### Latest-only 预览策略
+
+预览优先显示新画面，不保证每帧都被处理。Viewer 自身实现两级有界缓存：
+
+```text
+Dora INPUT → 接收/观测 → 每路最新未解码帧 → 独立解码线程 → 每路最新 RGB 帧 → UI
+```
+
+接收线程不做 JPEG/PNG 解码，按 input ID 覆盖待处理帧。解码线程每次只取一个输入；
+其他输入仍保留在队列中，可以继续被新帧覆盖。替换不改变该输入的排队位置，因此高频一路
+不会饿死已在等待的其他路。正在解码的一帧不会被强制取消。
+
+此前只有解码后的 mailbox 是 latest-only，接收线程还同步解码，旧消息因而积压在 Dora
+队列里。现在 latest-only 是 Viewer 的固有行为，使用普通 `image: camera/image` 映射即可，
+无需 `queue_size`/`queue_policy`，也与 `FORGE_OBSERVABILITY` 开关无关。
+
+正常停止时丢弃未解码帧、唤醒解码线程，并尽力打印累计 `replaced_before_decode`。
+观测的 hop/E2E 仍止于接收边界，不包含新增的解码前等待、解码或显示时间；更低的 hop
+不等于更高的解码 FPS，也不等于同样低的屏幕延迟。该策略不适用于完整逐帧录制。
+Dora 自身仍有传输缓冲；如果接收线程本身也处理不过来，Viewer 无法消除上游积压。
 
 在其他 dataflow 中使用：
 

@@ -130,6 +130,25 @@ fn example_connects_camera_to_viewer_with_relative_artifact_path() {
 }
 
 #[test]
+fn viewer_example_does_not_require_transport_queue_overrides() {
+    let dataflow = read_yaml(&root().join("examples/dora_image_stream/dataflow.yaml"));
+    let viewer = dataflow["nodes"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|node| node["id"] == "image_viewer")
+        .unwrap();
+    let inputs = viewer["inputs"].as_mapping().expect("viewer inputs");
+    assert!(!inputs.is_empty());
+    for (id, input) in inputs {
+        assert!(
+            input.as_str().is_some(),
+            "input {id:?} must use default Dora queue settings"
+        );
+    }
+}
+
+#[test]
 fn package_script_matches_delivery_contract() {
     let script =
         fs::read_to_string(root().join("scripts/package_release.sh")).expect("read package script");

@@ -6,6 +6,16 @@ The project follows Semantic Versioning. Dates use the `YYYY-MM-DD` format.
 
 ## Unreleased
 
+### Added
+
+- Add opt-in publish/receive latency observation with `FORGE_OBSERVABILITY=1`, using the published `forgelab_common 2.1.0` crate. Report bounded hop/end-to-end interval aggregates and diagnostics without including decoding or display time.
+
+### Changed
+
+- Implement latest-only before decoding inside the viewer: a dedicated receive thread replaces each input's pending frame, and a separate decoder selects one pending input at a time with FIFO fairness between ports. Keep the existing latest-frame UI mailbox.
+- Bound pending input count and visible Arrow buffer storage, account for shared allocations once per message, discard pending work on stop, and report replacement totals. Keep successful-image admission and bounded decode warnings.
+- Keep standard Dora input mappings in examples; no `queue_size` or queue-policy override is required. Intermediate frames may be dropped for freshness, without increasing decode throughput or claiming screen-display latency.
+
 ## 2.0.0 - 2026-09-04
 
 ### Changed
