@@ -11,9 +11,14 @@ on:
         description: Image viewer version without the v prefix
         required: true
         default: 2.1.0
+      upload_to_release:
+        description: Attach verified archives to an existing draft release
+        required: false
+        type: boolean
+        default: false
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -93,3 +98,52 @@ jobs:
             image_viewer-v${{ inputs.version }}-ubuntu20.04-x86_64.tar.gz.sha256
           if-no-files-found: error
           retention-days: 30
+
+      - name: Attach verified archives to draft release
+        if: ${{ inputs.upload_to_release }}
+        uses: actions/github-script@v7
+        env:
+          RELEASE_TAG: ${{ inputs.ref }}
+        with:
+          script: |
+            const fs = require('fs');
+            const crypto = require('crypto');
+            const { owner, repo } = context.repo;
+            const tag = process.env.RELEASE_TAG;
+            const version = process.env.RELEASE_VERSION;
+            if (!/^\d+\.\d+\.\d+$/.test(version) || tag !== `v${version}`) {
+              throw new Error('Invalid release tag or version');
+            }
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              owner, repo, per_page: 100,
+            });
+            const release = releases.find(item => item.tag_name === tag);
+            if (!release || !release.draft) {
+              throw new Error('An existing draft release is required');
+            }
+            const archive = `image_viewer-v${version}-ubuntu20.04-x86_64.tar.gz`;
+            const checksum = `${archive}.sha256`;
+            const bytes = fs.readFileSync(archive);
+            const digest = crypto.createHash('sha256').update(bytes).digest('hex');
+            if (fs.readFileSync(checksum, 'utf8').trim() !== `${digest}  ${archive}`) {
+              throw new Error('Archive checksum mismatch');
+            }
+            const assets = await github.paginate(github.rest.repos.listReleaseAssets, {
+              owner, repo, release_id: release.id, per_page: 100,
+            });
+            for (const name of [archive, checksum]) {
+              const data = fs.readFileSync(name);
+              const expected = `sha256:${crypto.createHash('sha256').update(data).digest('hex')}`;
+              const existing = assets.find(item => item.name === name);
+              if (existing) {
+                if (existing.digest !== expected) {
+                  throw new Error(`Refusing to replace existing asset: ${name}`);
+                }
+                core.info(`Identical asset already attached: ${name}`);
+                continue;
+              }
+              await github.rest.repos.uploadReleaseAsset({
+                owner, repo, release_id: release.id, name, data,
+                headers: { 'content-type': 'application/octet-stream' },
+              });
+            }
