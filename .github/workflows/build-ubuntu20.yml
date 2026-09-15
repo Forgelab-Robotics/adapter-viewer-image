@@ -6,11 +6,11 @@ on:
       ref:
         description: Git ref to build
         required: true
-        default: v2.1.0
+        default: v2.1.1
       version:
         description: Image viewer version without the v prefix
         required: true
-        default: 2.1.0
+        default: 2.1.1
       upload_to_release:
         description: Attach verified archives to an existing draft release
         required: false
@@ -22,11 +22,28 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    name: Build Ubuntu 20.04 (${{ matrix.asset_arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset_arch: x86_64
+            machine: Advanced Micro Devices X86-64
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            asset_arch: arm64
+            machine: AArch64
+    runs-on: ${{ matrix.runner }}
     container:
       image: ubuntu:20.04
     env:
+      LC_ALL: C
       RELEASE_VERSION: ${{ inputs.version }}
+      TARGET: ${{ matrix.target }}
+      ASSET_ARCH: ${{ matrix.asset_arch }}
+      EXPECTED_MACHINE: ${{ matrix.machine }}
     steps:
       - name: Install system tools
         run: |
@@ -54,6 +71,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.97.1"
+          targets: ${{ matrix.target }}
 
       - name: Build and package release binary
         run: bash scripts/package_release.sh
@@ -64,6 +82,8 @@ jobs:
           ./dist/image_viewer --version | tee /tmp/version.txt
           grep -q "${RELEASE_VERSION}" /tmp/version.txt
           file ./dist/image_viewer | grep -q 'ELF 64-bit LSB'
+          readelf -h ./dist/image_viewer |
+            grep -Eq "^[[:space:]]*Machine:[[:space:]]*${EXPECTED_MACHINE}[[:space:]]*$"
           test -z "$(ldd ./dist/image_viewer | grep 'not found' || true)"
           max_glibc="$(objdump -T ./dist/image_viewer |
             grep -oE 'GLIBC_[0-9.]+' | sort -Vu | tail -1)"
@@ -76,7 +96,7 @@ jobs:
             exit 1
           fi
           ldd --version | sed -n '1p'
-          archive="image_viewer-v${RELEASE_VERSION}-ubuntu20.04-x86_64.tar.gz"
+          archive="image_viewer-v${RELEASE_VERSION}-ubuntu20.04-${ASSET_ARCH}.tar.gz"
           tar \
             --sort=name \
             --mtime='UTC 1970-01-01' \
@@ -89,13 +109,20 @@ jobs:
           sha256sum "${archive}" > "${archive}.sha256"
           test "$(tar -tzf "${archive}")" = "image_viewer"
           sha256sum --check "${archive}.sha256"
+          clean_runtime="/tmp/image-viewer-clean-runtime-${ASSET_ARCH}"
+          rm -rf "${clean_runtime}"
+          mkdir -p "${clean_runtime}"
+          tar -xzf "${archive}" -C "${clean_runtime}"
+          env -i HOME="${clean_runtime}" PATH=/usr/bin:/bin \
+            "${clean_runtime}/image_viewer" --version | grep -q "${RELEASE_VERSION}"
+          rm -rf "${clean_runtime}"
 
       - uses: actions/upload-artifact@v6
         with:
-          name: image_viewer-v${{ inputs.version }}-ubuntu20.04-x86_64
+          name: image_viewer-v${{ inputs.version }}-ubuntu20.04-${{ matrix.asset_arch }}
           path: |
-            image_viewer-v${{ inputs.version }}-ubuntu20.04-x86_64.tar.gz
-            image_viewer-v${{ inputs.version }}-ubuntu20.04-x86_64.tar.gz.sha256
+            image_viewer-v${{ inputs.version }}-ubuntu20.04-${{ matrix.asset_arch }}.tar.gz
+            image_viewer-v${{ inputs.version }}-ubuntu20.04-${{ matrix.asset_arch }}.tar.gz.sha256
           if-no-files-found: error
           retention-days: 30
 
@@ -104,6 +131,7 @@ jobs:
         uses: actions/github-script@v7
         env:
           RELEASE_TAG: ${{ inputs.ref }}
+          ASSET_ARCH: ${{ matrix.asset_arch }}
         with:
           script: |
             const fs = require('fs');
@@ -111,6 +139,7 @@ jobs:
             const { owner, repo } = context.repo;
             const tag = process.env.RELEASE_TAG;
             const version = process.env.RELEASE_VERSION;
+            const assetArch = process.env.ASSET_ARCH;
             if (!/^\d+\.\d+\.\d+$/.test(version) || tag !== `v${version}`) {
               throw new Error('Invalid release tag or version');
             }
@@ -121,7 +150,10 @@ jobs:
             if (!release || !release.draft) {
               throw new Error('An existing draft release is required');
             }
-            const archive = `image_viewer-v${version}-ubuntu20.04-x86_64.tar.gz`;
+            if (!['x86_64', 'arm64'].includes(assetArch)) {
+              throw new Error('Invalid release asset architecture');
+            }
+            const archive = `image_viewer-v${version}-ubuntu20.04-${assetArch}.tar.gz`;
             const checksum = `${archive}.sha256`;
             const bytes = fs.readFileSync(archive);
             const digest = crypto.createHash('sha256').update(bytes).digest('hex');

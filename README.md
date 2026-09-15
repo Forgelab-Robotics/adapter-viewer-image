@@ -2,7 +2,7 @@
 
 独立的 Rust/Dora 实时图像查看工具，基于 `eframe`/`egui` 显示一路或多路图像流。
 
-当前版本：`2.1.0`。
+当前版本：`2.1.1`。
 
 ## 支持范围
 
@@ -50,7 +50,7 @@ path: image_viewer
 - Rust 1.97.1 或更新的 stable 工具链。
 - Dora 运行环境。
 - 能访问 crates.io 以获取 `Cargo.lock` 固定的公开依赖；准备好 Cargo 缓存后可使用 `--offline` 构建。
-- Linux x86_64 桌面环境：X11 或 Wayland。
+- Linux x86_64 或 ARM64/aarch64 桌面环境：X11 或 Wayland。
 - WGPU 模式需要可用的 Vulkan/图形驱动；Glow 模式需要可用的 OpenGL/GLX/EGL 驱动。
 
 Ubuntu/Debian 构建环境可安装：
@@ -98,13 +98,19 @@ install -Dm755 target/release/image_viewer ~/.local/bin/image_viewer
 
 ## 打包交付
 
-执行标准打包脚本：
+执行标准打包脚本。未设置 `TARGET` 时默认构建 Linux x86_64：
 
 ```bash
 bash scripts/package_release.sh
 ```
 
-脚本使用锁文件和固定的 `x86_64-unknown-linux-gnu` target 进行 release 构建，清理旧 `dist/` 内容，并且只生成用户二进制：
+在 Linux ARM64/aarch64 主机上构建 ARM64 产物：
+
+```bash
+TARGET=aarch64-unknown-linux-gnu bash scripts/package_release.sh
+```
+
+脚本仅接受 `x86_64-unknown-linux-gnu` 和 `aarch64-unknown-linux-gnu`，使用锁文件进行 release 构建，清理旧 `dist/` 内容，并且只生成用户二进制：
 
 ```text
 dist/image_viewer
@@ -116,7 +122,7 @@ dist/image_viewer
 install -Dm755 dist/image_viewer ~/.local/bin/image_viewer
 ```
 
-该产物是动态链接的 Linux x86_64 二进制；当前发布基线为 glibc 2.39，目标机器还需提供 X11/Wayland、Vulkan/OpenGL 驱动及 Dora 运行环境。打包脚本使用 `file`、`readelf` 验证架构；发布前还需检查 `RPATH`/`RUNPATH`、缺失动态库及最高 GLIBC 符号要求。
+两种架构的产物都是动态链接的 Linux 二进制。官方发布工作流在对应架构的原生 runner 上使用 Ubuntu 20.04 容器构建，发布基线为 glibc 2.31；部署系统需要兼容 glibc 2.31，并提供产物所需的动态库、X11/Wayland、Vulkan/OpenGL 驱动及 Dora 运行环境。动态依赖不会打入归档，通常包括系统 C/C++ 运行库、X11/Wayland 与 `libxkbcommon`，以及所选渲染后端使用的 Vulkan loader 或 OpenGL/EGL 库；具体清单以目标机器上的 `ldd dist/image_viewer` 为准。打包脚本使用 `file`、`readelf` 验证目标架构；发布前还需检查 `RPATH`/`RUNPATH`、`ldd` 报告的缺失动态库及最高 GLIBC 符号要求。
 
 ## 配置
 
