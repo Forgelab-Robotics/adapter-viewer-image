@@ -6,6 +6,12 @@ The project follows Semantic Versioning. Dates use the `YYYY-MM-DD` format.
 
 ## Unreleased
 
+## 1.0.3 - 2026-09-15
+
+### Fixed
+
+- Accepted Ubuntu 20.04 `file` output that classifies PIE binaries as shared objects while retaining strict architecture validation with `readelf`.
+
 ## 1.0.2 - 2026-09-15
 
 ### Added

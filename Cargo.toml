@@ -1,6 +1,6 @@
 [package]
 name = "forge-tools-image-viewer"
-version = "1.0.2"
+version = "1.0.3"
 edition = "2024"
 rust-version = "1.97.1"
 description = "Dora image stream viewer for Forge robotics dataflows."

@@ -12,11 +12,11 @@ CARGO_HOME_DIR="${CARGO_HOME:-${HOME_DIR}/.cargo}"
 
 case "${TARGET}" in
     x86_64-unknown-linux-gnu)
-        FILE_ARCH_REGEX='ELF 64-bit LSB (pie )?executable, x86-64,'
+        FILE_ARCH_REGEX='ELF 64-bit LSB.*x86-64'
         READELF_MACHINE='Advanced Micro Devices X86-64'
         ;;
     aarch64-unknown-linux-gnu)
-        FILE_ARCH_REGEX='ELF 64-bit LSB (pie )?executable, ARM aarch64,'
+        FILE_ARCH_REGEX='ELF 64-bit LSB.*ARM aarch64'
         READELF_MACHINE='AArch64'
         ;;
     *)
