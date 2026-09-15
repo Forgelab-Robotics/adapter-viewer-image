@@ -163,8 +163,8 @@ fn package_script_matches_delivery_contract() {
     assert!(script.contains("aarch64-unknown-linux-gnu)"));
     assert!(script.contains("ERROR: unsupported TARGET"));
     assert!(script.contains("exit 2"));
-    assert!(script.contains("FILE_ARCH_REGEX='ELF 64-bit LSB (pie )?executable, x86-64,'"));
-    assert!(script.contains("FILE_ARCH_REGEX='ELF 64-bit LSB (pie )?executable, ARM aarch64,'"));
+    assert!(script.contains("FILE_ARCH_REGEX='ELF 64-bit LSB.*x86-64'"));
+    assert!(script.contains("FILE_ARCH_REGEX='ELF 64-bit LSB.*ARM aarch64'"));
     assert!(script.contains("READELF_MACHINE='Advanced Micro Devices X86-64'"));
     assert!(script.contains("READELF_MACHINE='AArch64'"));
     assert!(script.contains("file \"${BUILT_ARTIFACT}\" | grep -Eq \"${FILE_ARCH_REGEX}\""));

@@ -6,11 +6,11 @@ on:
       ref:
         description: Git ref to build
         required: true
-        default: v2.1.1
+        default: v2.1.2
       version:
         description: Image viewer version without the v prefix
         required: true
-        default: 2.1.1
+        default: 2.1.2
       upload_to_release:
         description: Attach verified archives to an existing draft release
         required: false
