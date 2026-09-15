@@ -6,6 +6,16 @@ The project follows Semantic Versioning. Dates use the `YYYY-MM-DD` format.
 
 ## Unreleased
 
+## 1.0.2 - 2026-09-15
+
+### Added
+
+- Add Linux ARM64/aarch64 release packaging alongside the existing x86_64 artifact, using the Ubuntu 20.04/glibc 2.31 release baseline.
+
+### Fixed
+
+- Updated the locked `h2` dependency to 0.4.19 to address `RUSTSEC-2026-0258`.
+
 ## 1.0.1 - 2026-08-17
 
 ### Changed

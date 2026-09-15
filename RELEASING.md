@@ -37,16 +37,22 @@ Published tags and assets must never be replaced. Any changed payload requires a
 
 ## Binary release
 
-Build the Linux x86_64 binary with the standard script:
+The standard script defaults to Linux x86_64 and also accepts the Linux ARM64 target:
 
 ```bash
 bash scripts/package_release.sh
+TARGET=aarch64-unknown-linux-gnu bash scripts/package_release.sh
 ```
 
-The script fixes the `x86_64-unknown-linux-gnu` target, remaps local build paths, strips symbols, verifies the ELF architecture, and writes only `dist/image_viewer`.
+Only `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` are accepted. The script remaps local build paths, strips symbols, verifies the selected ELF architecture with `file` and `readelf`, and writes only `dist/image_viewer`. Build each target on a matching native architecture unless a reviewed cross-compilation environment provides all required system libraries.
 
-The executable is dynamically linked. The selected release baseline is glibc 2.39. Before upload, use `file`, `readelf`, and `ldd` to reject missing libraries and unexpected `RPATH`/`RUNPATH` entries, and confirm the highest GLIBC symbol requirement is `GLIBC_2.39`.
+The `Build Ubuntu 20.04 binary` workflow runs one matrix invocation that builds both architectures on native runners inside `ubuntu:20.04` containers. Its two minimal public archives are:
 
-The minimal public archive is named `image_viewer-v<version>-linux-x86_64-glibc2.39.tar.gz` and contains only the stripped `image_viewer` executable. Project documentation and licensing remain available in the repository and GitHub-generated source archives.
+- `image_viewer-v<version>-ubuntu20.04-x86_64.tar.gz`
+- `image_viewer-v<version>-ubuntu20.04-arm64.tar.gz`
 
-Create the archive with normalized owner, group, mode, ordering, and timestamp. Scan the final binary for private paths and internal URLs, publish its SHA-256 digest, and smoke-test the extracted binary before publishing.
+Each archive contains only the stripped `image_viewer` executable and has a matching `.sha256` file. Project documentation and licensing remain available in the repository and GitHub-generated source archives.
+
+The executables are dynamically linked. The release baseline is Ubuntu 20.04/glibc 2.31. For each architecture, the workflow rejects an unexpected `readelf` machine, missing `ldd` libraries, GLIBC symbol requirements newer than 2.31, and unexpected private paths or internal URLs. It also checks the normalized archive and digest, extracts the archive into a clean directory, and runs `image_viewer --version` with a minimal environment.
+
+Before publishing, perform a clean-runtime test of each extracted archive on a matching x86_64 or ARM64 Ubuntu 20.04/glibc 2.31 system with only the documented runtime libraries and graphics stack installed. Recheck `file`, `readelf`, `ldd`, and `RPATH`/`RUNPATH`, then complete the WGPU and Glow smoke tests where supported. Published assets are immutable; do not replace a differing archive or checksum.

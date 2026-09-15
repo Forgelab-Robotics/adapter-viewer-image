@@ -138,7 +138,17 @@ fn package_script_matches_delivery_contract() {
     assert!(
         script.contains("BUILT_ARTIFACT=\"${ROOT_DIR}/target/${TARGET}/release/image_viewer\"")
     );
-    assert!(script.contains("TARGET=\"x86_64-unknown-linux-gnu\""));
+    assert!(script.contains("TARGET=\"${TARGET:-x86_64-unknown-linux-gnu}\""));
+    assert!(script.contains("x86_64-unknown-linux-gnu)"));
+    assert!(script.contains("aarch64-unknown-linux-gnu)"));
+    assert!(script.contains("ERROR: unsupported TARGET"));
+    assert!(script.contains("exit 2"));
+    assert!(script.contains("FILE_ARCH_REGEX='ELF 64-bit LSB (pie )?executable, x86-64,'"));
+    assert!(script.contains("FILE_ARCH_REGEX='ELF 64-bit LSB (pie )?executable, ARM aarch64,'"));
+    assert!(script.contains("READELF_MACHINE='Advanced Micro Devices X86-64'"));
+    assert!(script.contains("READELF_MACHINE='AArch64'"));
+    assert!(script.contains("file \"${BUILT_ARTIFACT}\" | grep -Eq \"${FILE_ARCH_REGEX}\""));
+    assert!(script.contains("Machine:[[:space:]]*${READELF_MACHINE}"));
     assert!(script.contains("trap 'rm -rf \"${DIST_DIR}\"' ERR"));
     assert!(
         script.find("rm -rf \"${DIST_DIR}\"").unwrap()
